@@ -17,6 +17,8 @@ export async function validateToken(accessToken: string): Promise<ValidationResu
       headers: {
         "Authorization": `Bearer ${accessToken}`,
         "anthropic-version": "2023-06-01",
+        // Required for api.anthropic.com to accept OAuth tokens (sk-ant-oat01-*)
+        "anthropic-beta": "oauth-2025-04-20",
       },
     });
 
