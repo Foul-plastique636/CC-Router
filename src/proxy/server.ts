@@ -77,6 +77,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const proxy = createProxyMiddleware<Request, ServerResponse>({
     target,
     changeOrigin: true,
+    // Express strips the /v1 mount prefix from req.url before passing it to middleware.
+    // pathRewrite restores it so the proxy forwards /v1/messages, not /messages.
+    pathRewrite: (path) => `/v1${path}`,
     // Long timeouts — Claude Code requests can be >5min (thinking, agents)
     proxyTimeout: 5 * 60 * 1000,
     timeout: 5 * 60 * 1000,
@@ -94,12 +97,23 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         // not x-api-key. Having both set can cause conflicts at Anthropic's side.
         proxyReq.removeHeader("x-api-key");
 
+        // CRITICAL: api.anthropic.com requires the "oauth-2025-04-20" beta flag to
+        // accept OAuth tokens (sk-ant-oat01-*). Without it the request is rejected
+        // with "OAuth authentication is currently not supported."
+        // APPEND — do NOT replace — so existing betas (tools, computer-use, etc.) are preserved.
+        const existingBeta = proxyReq.getHeader("anthropic-beta");
+        const betas = existingBeta
+          ? String(existingBeta).split(",").map(b => b.trim()).filter(Boolean)
+          : [];
+        if (!betas.includes("oauth-2025-04-20")) {
+          betas.push("oauth-2025-04-20");
+          proxyReq.setHeader("anthropic-beta", betas.join(","));
+        }
+
         // All other headers are forwarded automatically by http-proxy-middleware:
-        //   anthropic-version     — required by Anthropic API
-        //   anthropic-beta        — MUST be forwarded: controls features (tools,
-        //                           computer use, extended thinking, prompt caching)
-        //   X-Claude-Code-Session-Id — session aggregation header sent by Claude Code
-        //   content-type          — always application/json
+        //   anthropic-version         — required by Anthropic API
+        //   X-Claude-Code-Session-Id  — session aggregation header sent by Claude Code
+        //   content-type              — always application/json
       },
 
       proxyRes: (proxyRes, req) => {
