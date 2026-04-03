@@ -1,5 +1,0 @@
-Quiero que:
-- configures el proyecto en un entorno de test.
-- que obtengas mi cuenta local de cloud.
-- luego, en una carpeta temporal (sobre todo que no se añada nada de esto al git).
-- Quiero que pruebes que esté funcionando, mandando una petición para crear un html básico y que realmente lo comprobases, los logs que realmente se estén rotando bien.
