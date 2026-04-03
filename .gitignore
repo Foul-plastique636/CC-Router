@@ -9,6 +9,9 @@ node_modules/
 .planning/
 .planning/**
 
+# Internal docs — keep out of public repo
+prd.md
+
 # Secrets — NEVER commit these
 accounts.json
 *.local.json
