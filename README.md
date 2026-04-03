@@ -94,7 +94,7 @@ Run cc-router on a machine everyone on the team can reach — a home server, a V
 #### On the server
 
 ```bash
-npm install -g cc-router
+npm install -g ai-cc-router
 cc-router setup          # configure the 3 shared accounts
 cc-router service install # auto-start on boot
 ```
@@ -172,7 +172,7 @@ Each developer then points to:
 
 ```bash
 # 1. Install
-npm install -g cc-router
+npm install -g ai-cc-router
 
 # 2. Wizard: extract tokens + configure Claude Code automatically
 cc-router setup
