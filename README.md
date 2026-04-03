@@ -43,6 +43,131 @@ All standard Claude Code features work transparently: streaming, extended thinki
 
 ---
 
+## Use cases
+
+### Heavy user — one account isn't enough
+
+Claude Max has rate limits per account. If you hit them regularly mid-session — waiting for cooldowns, getting 429s — you're a good candidate.
+
+With two accounts you double your effective rate limit. With three, you triple it. The proxy distributes requests automatically; you don't change how you use Claude Code at all.
+
+```text
+1 account  →  hit limit, wait 60s, continue
+3 accounts →  request rotates across all three, limit effectively tripled
+```
+
+---
+
+### Team sharing accounts — fewer subscriptions, same throughput
+
+A team of five doesn't need five Max subscriptions. In practice, developers don't all peak at the same time. Three accounts can comfortably serve five people working normal hours.
+
+#### Example setup: 5 devs, 3 accounts
+
+```text
+cc-router (hosted on a shared machine or VPS)
+     │
+     ├── max-account-1   ← alice's subscription
+     ├── max-account-2   ← bob's subscription
+     └── max-account-3   ← carol's subscription
+           │
+           └── serves: alice, bob, carol, dave, eve
+```
+
+Each developer sets their `ANTHROPIC_BASE_URL` to the shared proxy. Done. The proxy handles routing and token refresh invisibly.
+
+#### Cost example
+
+| Setup | Monthly cost |
+|-------|-------------|
+| 5 individual Max subscriptions | 5 × $100 = **$500/mo** |
+| 3 shared via cc-router | 3 × $100 = **$300/mo** |
+
+You save $200/mo without any loss in capability for a typical team workload.
+
+---
+
+### Hosting cc-router on a shared machine
+
+Run cc-router on a machine everyone on the team can reach — a home server, a VPS, or a spare machine on the office network.
+
+#### On the server
+
+```bash
+npm install -g cc-router
+cc-router setup          # configure the 3 shared accounts
+cc-router service install # auto-start on boot
+```
+
+By default cc-router binds to `localhost`. To accept connections from other machines, set the `HOST` environment variable:
+
+```bash
+# Listen on all interfaces (team LAN or VPS)
+HOST=0.0.0.0 cc-router start
+
+# Or configure it permanently in the service
+```
+
+#### On each developer's machine
+
+No installation needed. Just set two environment variables in `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://192.168.1.50:3456",
+    "ANTHROPIC_AUTH_TOKEN": "proxy-managed"
+  }
+}
+```
+
+Replace `192.168.1.50` with the server's IP or hostname. Then run `claude` normally.
+
+Or use the CLI to write the settings automatically:
+
+```bash
+cc-router configure --port 3456
+# Then manually update ANTHROPIC_BASE_URL to the remote IP
+```
+
+---
+
+### Hosting on a VPS (internet-accessible)
+
+If your team is distributed or works remotely, run cc-router on a VPS and expose it over HTTPS via a reverse proxy.
+
+#### Recommended nginx config
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name cc-router.yourcompany.com;
+
+    # ... SSL cert config (e.g. Let's Encrypt) ...
+
+    location / {
+        proxy_pass http://127.0.0.1:3456;
+        proxy_buffering off;          # required for SSE streaming
+        proxy_read_timeout 300s;      # required for long thinking requests
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+}
+```
+
+Each developer then points to:
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://cc-router.yourcompany.com",
+    "ANTHROPIC_AUTH_TOKEN": "proxy-managed"
+  }
+}
+```
+
+**Security note:** if the proxy is internet-accessible, add authentication at the nginx level (basic auth, mTLS, or IP allowlist) so only your team can use it. cc-router does not implement user authentication itself.
+
+---
+
 ## Quickstart
 
 ```bash
@@ -127,7 +252,7 @@ cc-router setup
 
 ## CLI Reference
 
-```
+```text
 cc-router setup              Interactive wizard: extract tokens + configure Claude Code
 cc-router setup --add        Add another account to an existing configuration
 
@@ -169,7 +294,7 @@ cc-router docker restart [service]  Restart a service
 
 ### Standalone (default — no Docker)
 
-```
+```text
 Claude Code → cc-router:3456 → api.anthropic.com
 ```
 
@@ -181,7 +306,7 @@ cc-router start
 
 ### Full mode with LiteLLM (optional — requires Docker)
 
-```
+```text
 Claude Code → cc-router:3456 → LiteLLM:4000 → api.anthropic.com
 ```
 
@@ -214,7 +339,7 @@ This stops the proxy process and removes cc-router's settings from `~/.claude/se
 cc-router status
 ```
 
-```
+```text
  CC-Router  ·  standalone → api.anthropic.com  ·  up 2h 14m  ·  [q] quit
 
  ACCOUNTS  2/2 healthy

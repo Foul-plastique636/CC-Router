@@ -203,7 +203,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   process.on("SIGINT", shutdown);
 
   // ─── Start ────────────────────────────────────────────────────────────────
-  app.listen(port, () => {
-    logStartup(port, mode, target, accounts.length);
+  // HOST env var lets teams bind to 0.0.0.0 for LAN/VPS shared access.
+  // Defaults to 127.0.0.1 (localhost-only) for single-user safety.
+  const host = process.env["HOST"] ?? "127.0.0.1";
+  app.listen(port, host, () => {
+    logStartup(port, host, mode, target, accounts.length);
   });
 }
