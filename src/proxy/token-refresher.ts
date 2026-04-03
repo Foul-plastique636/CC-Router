@@ -14,7 +14,7 @@ const CLAUDE_CODE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
  * Primary OAuth token endpoint.
  * Alternative: https://claude.ai/v1/oauth/token
  */
-const TOKEN_ENDPOINT = "https://console.anthropic.com/api/oauth/token";
+const TOKEN_ENDPOINT = "https://claude.ai/v1/oauth/token";
 
 /** Refresh 10 minutes before expiry */
 const REFRESH_BUFFER_MS = 10 * 60 * 1000;
@@ -45,14 +45,16 @@ export async function refreshAccountToken(account: Account): Promise<boolean> {
 
 async function _doRefresh(account: Account): Promise<boolean> {
   try {
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: account.tokens.refreshToken,
+      client_id: CLAUDE_CODE_CLIENT_ID,
+    });
+
     const res = await fetch(TOKEN_ENDPOINT, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        grant_type: "refresh_token",
-        refresh_token: account.tokens.refreshToken,
-        client_id: CLAUDE_CODE_CLIENT_ID,
-      }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
     });
 
     if (!res.ok) {
