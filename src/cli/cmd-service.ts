@@ -47,7 +47,8 @@ export function registerService(program: Command): void {
         await execFileAsync("pm2", [
           "start", CLI_ENTRY,
           "--name", "cc-router",
-          "--interpreter", process.execPath, // use current node binary
+          "--interpreter", process.execPath,
+          "--max-memory-restart", "500M", // restart if memory exceeds 500MB
           "--",
           "start",
         ]);
