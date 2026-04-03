@@ -1,0 +1,166 @@
+import type { Command } from "commander";
+import chalk from "chalk";
+import { loadAccounts, accountsFileExists, writeAccountsAtomic } from "../config/manager.js";
+import { saveAccounts } from "../proxy/token-refresher.js";
+import { formatExpiry, redactToken } from "../utils/token-extractor.js";
+import { PROXY_PORT } from "../config/paths.js";
+
+export function registerAccounts(program: Command): void {
+  const accounts = program
+    .command("accounts")
+    .description("Manage Claude Max accounts in the token pool");
+
+  // ── accounts list ────────────────────────────────────────────────────────
+  accounts
+    .command("list")
+    .description("List all configured accounts and their status")
+    .option("--json", "Output as JSON")
+    .action(async (opts: { json?: boolean }) => {
+      // Try to get live stats from the running proxy first
+      const liveStats = await fetchLiveStats();
+
+      if (!accountsFileExists()) {
+        console.log(chalk.yellow("No accounts configured. Run: cc-router setup"));
+        return;
+      }
+
+      const stored = loadAccounts();
+      if (stored.length === 0) {
+        console.log(chalk.yellow("accounts.json is empty. Run: cc-router setup"));
+        return;
+      }
+
+      if (opts.json) {
+        console.log(JSON.stringify(liveStats ?? stored, null, 2));
+        return;
+      }
+
+      console.log(chalk.bold(`\n  Accounts (${stored.length} configured)\n`));
+
+      if (liveStats) {
+        console.log(chalk.green("  ● Proxy is running — showing live stats\n"));
+        for (const s of liveStats) {
+          const status = s.healthy
+            ? chalk.green("✓ healthy")
+            : chalk.red("✗ unhealthy");
+          const busy = s.busy ? chalk.yellow(" [busy]") : "";
+          const exp = s.expiresInMs > 0
+            ? chalk.yellow(formatMs(s.expiresInMs))
+            : chalk.red("EXPIRED");
+          console.log(
+            `  ${chalk.bold(s.id.padEnd(24))}` +
+            `  ${status}${busy}` +
+            `  requests: ${chalk.cyan(String(s.requestCount).padStart(5))}` +
+            `  errors: ${chalk.red(String(s.errorCount).padStart(3))}` +
+            `  expires: ${exp}`
+          );
+        }
+      } else {
+        console.log(chalk.gray("  (Proxy not running — showing stored configuration)\n"));
+        for (const a of stored) {
+          const exp = formatExpiry(a.tokens.expiresAt);
+          const expColor = a.tokens.expiresAt > Date.now()
+            ? chalk.yellow(exp)
+            : chalk.red(exp);
+          console.log(
+            `  ${chalk.bold(a.id.padEnd(24))}` +
+            `  ${redactToken(a.tokens.accessToken).padEnd(26)}` +
+            `  expires: ${expColor}` +
+            `  scopes: ${chalk.gray(a.tokens.scopes.join(" "))}`
+          );
+        }
+      }
+
+      console.log();
+    });
+
+  // ── accounts add ─────────────────────────────────────────────────────────
+  accounts
+    .command("add")
+    .description("Add a new Claude Max account interactively")
+    .action(async () => {
+      const { setupSingleAccount } = await import("./cmd-setup.js");
+
+      const existing = accountsFileExists() ? loadAccounts() : [];
+      const account = await setupSingleAccount(existing.length + 1);
+
+      if (!account) {
+        console.log(chalk.yellow("\nNo account added.\n"));
+        return;
+      }
+
+      // Merge: replace by ID if already exists, otherwise append
+      const merged = [
+        ...existing.filter(a => a.id !== account.id),
+        account,
+      ];
+
+      saveAccounts(merged);
+      console.log(chalk.green(`\n✓ Account "${account.id}" added (${merged.length} total).\n`));
+      console.log(chalk.gray("  Restart the proxy to load the new account: cc-router start\n"));
+    });
+
+  // ── accounts remove ───────────────────────────────────────────────────────
+  accounts
+    .command("remove <id>")
+    .description("Remove an account by its ID")
+    .action(async (id: string) => {
+      if (!accountsFileExists()) {
+        console.log(chalk.yellow("No accounts configured."));
+        return;
+      }
+
+      const existing = loadAccounts();
+      const filtered = existing.filter(a => a.id !== id);
+
+      if (filtered.length === existing.length) {
+        console.log(chalk.red(`✗ Account "${id}" not found.`));
+        console.log(chalk.gray(`  Available: ${existing.map(a => a.id).join(", ")}`));
+        process.exit(1);
+      }
+
+      const { confirm } = await import("@inquirer/prompts");
+      const sure = await confirm({
+        message: `Remove "${id}"? This cannot be undone.`,
+        default: false,
+      });
+      if (!sure) { console.log(chalk.gray("Cancelled.")); return; }
+
+      writeAccountsAtomic(filtered.map(a => ({
+        id: a.id,
+        accessToken: a.tokens.accessToken,
+        refreshToken: a.tokens.refreshToken,
+        expiresAt: a.tokens.expiresAt,
+        scopes: a.tokens.scopes,
+      })));
+
+      console.log(chalk.green(`✓ Removed "${id}". ${filtered.length} account(s) remaining.`));
+      if (filtered.length === 0) {
+        console.log(chalk.yellow("  No accounts left. Run: cc-router setup"));
+      }
+    });
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+async function fetchLiveStats(): Promise<null | Array<{
+  id: string; healthy: boolean; busy: boolean;
+  requestCount: number; errorCount: number; expiresInMs: number;
+}>> {
+  try {
+    const res = await fetch(`http://localhost:${PROXY_PORT}/cc-router/health`, {
+      signal: AbortSignal.timeout(1_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { accounts: unknown[] };
+    return data.accounts as typeof fetchLiveStats extends () => Promise<null | Array<infer T>> ? T[] : never;
+  } catch {
+    return null;
+  }
+}
+
+function formatMs(ms: number): string {
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.floor((ms % 3_600_000) / 60_000);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}

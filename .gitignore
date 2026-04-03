@@ -1,0 +1,40 @@
+# Build output
+dist/
+
+# Dependencies
+node_modules/
+
+# Claude code:
+.claude/
+.planning/
+.planning/**
+
+# Secrets — NEVER commit these
+accounts.json
+*.local.json
+.env
+*.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+pm2.log
+lerna-debug.log
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Temp files
+*.tmp

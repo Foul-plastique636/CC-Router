@@ -1,0 +1,16 @@
+[
+  {
+    "id": "max-account-1",
+    "accessToken": "sk-ant-oat01-REPLACE_ME",
+    "refreshToken": "sk-ant-ort01-REPLACE_ME",
+    "expiresAt": 1748658860000,
+    "scopes": ["user:inference", "user:profile"]
+  },
+  {
+    "id": "max-account-2",
+    "accessToken": "sk-ant-oat01-REPLACE_ME",
+    "refreshToken": "sk-ant-ort01-REPLACE_ME",
+    "expiresAt": 1748658860000,
+    "scopes": ["user:inference", "user:profile"]
+  }
+]
