@@ -4,9 +4,13 @@ export interface LogEntry {
   model: string;
   type: "route" | "refresh" | "error";
   details?: string;
+  statusCode?: number;
+  durationMs?: number;
+  method?: string;
+  path?: string;
 }
 
-const MAX_LOG_ENTRIES = 50;
+const MAX_LOG_ENTRIES = 100;
 
 class ProxyStats {
   totalRequests = 0;

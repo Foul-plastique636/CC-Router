@@ -1,22 +1,26 @@
 import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import { ServerResponse } from "http";
+import { timingSafeEqual } from "crypto";
 import type { IncomingMessage } from "http";
 import type { Socket } from "net";
 import type { Request } from "express";
 import { TokenPool } from "./token-pool.js";
 import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } from "./token-refresher.js";
-import { loadAccounts, accountsFileExists, readAccountsFromPath } from "../config/manager.js";
+import { loadAccounts, accountsFileExists, readAccountsFromPath, readConfig } from "../config/manager.js";
 import { logRoute, logError, logStartup } from "./logger.js";
 import { stats } from "./stats.js";
+import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL } from "../config/paths.js";
 import type { Account } from "./types.js";
 import chalk from "chalk";
 
-// Augment Request to carry the selected account
+// Augment Request to carry the selected account and pending log entry
 declare module "express-serve-static-core" {
   interface Request {
     _ccAccount?: Account;
+    _startTime?: number;
+    _pendingLog?: Partial<LogEntry>;
   }
 }
 
@@ -56,6 +60,34 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   const app = express();
 
+  // ─── Proxy auth middleware ─────────────────────────────────────────────────
+  // If a proxySecret is configured, all requests must present it as
+  // "Authorization: Bearer <secret>". The /cc-router/health endpoint is
+  // always exempt so monitoring and PM2 healthchecks keep working.
+  const { proxySecret } = readConfig();
+  if (proxySecret) {
+    const secretBuf = Buffer.from(proxySecret, "utf-8");
+    app.use((req, res, next) => {
+      if (req.path === "/cc-router/health") return next();
+
+      const auth = (req.headers["authorization"] as string | undefined) ?? "";
+      const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+      const tokenBuf = Buffer.from(token, "utf-8");
+
+      if (
+        tokenBuf.length !== secretBuf.length ||
+        !timingSafeEqual(tokenBuf, secretBuf)
+      ) {
+        res.status(401).json({
+          type: "error",
+          error: { type: "authentication_error", message: "Invalid or missing proxy authentication token" },
+        });
+        return;
+      }
+      next();
+    });
+  }
+
   // ─── Health endpoint (cc-router internal, NOT proxied) ────────────────────
   app.get("/cc-router/health", (_req, res) => {
     res.json({
@@ -67,7 +99,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       totalErrors: stats.totalErrors,
       totalRefreshes: stats.totalRefreshes,
       accounts: pool.getStats(),
-      recentLogs: stats.getRecentLogs(),
+      recentLogs: stats.getRecentLogs(50),
     });
   });
 
@@ -121,6 +153,19 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         if (!account) return;
 
         const status = proxyRes.statusCode ?? 0;
+        const durationMs = (req as Request)._startTime
+          ? Date.now() - (req as Request)._startTime!
+          : undefined;
+
+        // Complete the pending log entry with response info
+        const pendingLog = (req as Request)._pendingLog ?? {
+          ts: Date.now(),
+          accountId: account.id,
+          model: "-",
+          type: "route" as const,
+        };
+        pendingLog.statusCode = status;
+        if (durationMs !== undefined) pendingLog.durationMs = durationMs;
 
         if (status === 401) {
           // Token invalid or expired mid-request.
@@ -128,41 +173,55 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           // Schedule a background refresh so the next request succeeds.
           stats.totalErrors++;
           account.errorCount++;
+          pendingLog.type = "error";
+          pendingLog.details = "token invalid";
           logError(account.id, 401, "Token invalid — scheduling background refresh");
-          stats.addLog({ ts: Date.now(), accountId: account.id, model: "-", type: "error", details: "401" });
 
           refreshAccountToken(account).then(ok => {
             if (ok) saveAccounts(pool.getAll());
           }).catch(console.error);
-        }
-
-        if (status === 429) {
+        } else if (status === 429) {
           // Rate limited — put account on cooldown for Retry-After seconds.
           stats.totalErrors++;
           account.errorCount++;
           const retryAfter = Number(proxyRes.headers["retry-after"] ?? 60);
+          pendingLog.type = "error";
+          pendingLog.details = `rate limited — cooldown ${retryAfter}s`;
           logError(account.id, 429, `Rate limited — cooldown ${retryAfter}s`);
-          stats.addLog({ ts: Date.now(), accountId: account.id, model: "-", type: "error", details: "429" });
 
           account.busy = true;
           setTimeout(() => { account.busy = false; }, retryAfter * 1_000);
-        }
-
-        if (status === 529) {
+        } else if (status === 529) {
           // Anthropic service overloaded — short cooldown on this account.
           stats.totalErrors++;
           account.errorCount++;
+          pendingLog.type = "error";
+          pendingLog.details = "service overloaded — cooldown 30s";
           logError(account.id, 529, "Service overloaded — cooldown 30s");
-          stats.addLog({ ts: Date.now(), accountId: account.id, model: "-", type: "error", details: "529" });
 
           account.busy = true;
           setTimeout(() => { account.busy = false; }, 30_000);
         }
+
+        stats.addLog(pendingLog as LogEntry);
       },
 
       error: (err: Error, _req: IncomingMessage, res: ServerResponse | Socket) => {
         stats.totalErrors++;
         logError("proxy", 0, err.message);
+
+        // Complete the pending log entry for connection-level errors
+        const pendingLog = (_req as Request)._pendingLog;
+        if (pendingLog) {
+          pendingLog.type = "error";
+          pendingLog.statusCode = 0;
+          pendingLog.details = err.message;
+          if ((_req as Request)._startTime) {
+            pendingLog.durationMs = Date.now() - (_req as Request)._startTime!;
+          }
+          stats.addLog(pendingLog as LogEntry);
+        }
+
         // res may be a Socket (WebSocket upgrade) — only respond on HTTP ServerResponse
         if (res instanceof ServerResponse && !res.headersSent) {
           // Match Anthropic's error response format so Claude Code handles it gracefully
@@ -189,8 +248,16 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     }
 
     req._ccAccount = account;
+    req._startTime = Date.now();
+    req._pendingLog = {
+      ts: Date.now(),
+      accountId: account.id,
+      model: "-",
+      type: "route",
+      method: req.method,
+      path: req.path,
+    };
     stats.totalRequests++;
-    stats.addLog({ ts: Date.now(), accountId: account.id, model: "?", type: "route" });
 
     logRoute(
       account.id,
