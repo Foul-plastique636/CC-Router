@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { dirname } from "path";
 import { CLAUDE_SETTINGS_PATH } from "../config/paths.js";
+import { readConfig } from "../config/manager.js";
 
 /**
  * Write ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN into ~/.claude/settings.json.
@@ -38,8 +39,8 @@ export function writeClaudeSettings(port: number, baseUrl?: string): void {
       ...existingEnv,
       ANTHROPIC_BASE_URL: resolvedUrl,
       // ANTHROPIC_AUTH_TOKEN has higher precedence than ANTHROPIC_API_KEY in Claude Code.
-      // The proxy replaces this placeholder with the real OAuth token per request.
-      ANTHROPIC_AUTH_TOKEN: "proxy-managed",
+      // Uses the configured proxy secret if set, otherwise falls back to the open placeholder.
+      ANTHROPIC_AUTH_TOKEN: readConfig().proxySecret ?? "proxy-managed",
     },
   };
 

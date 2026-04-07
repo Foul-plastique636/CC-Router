@@ -13,7 +13,7 @@ import {
 import { validateToken } from "../utils/token-validator.js";
 import { writeClaudeSettings, readClaudeProxySettings } from "../utils/claude-config.js";
 import { saveAccounts } from "../proxy/token-refresher.js";
-import { loadAccounts, accountsFileExists } from "../config/manager.js";
+import { loadAccounts, accountsFileExists, readConfig, writeConfig, generateProxySecret } from "../config/manager.js";
 import { PROXY_PORT } from "../config/paths.js";
 import type { Account, OAuthTokens } from "../proxy/types.js";
 
@@ -260,12 +260,44 @@ async function runPostSetupFlow(accountCount: number): Promise<void> {
       ? PROXY_PORT
       : parseInt(new URL(proxyHost).port || "80", 10);
 
-    writeClaudeSettings(port, proxyHost);
-    console.log(chalk.green(`\n  ✓ ~/.claude/settings.json updated`));
-    console.log(chalk.gray(`      ANTHROPIC_BASE_URL  = ${proxyHost}`));
-    console.log(chalk.gray(`      ANTHROPIC_AUTH_TOKEN = proxy-managed`));
-
+    // ── Password setup for remote proxy ───────────────────────────────────────
     if (proxyLocation === "remote") {
+      const pwChoice = await select({
+        message: "Set a proxy password? (strongly recommended for internet-exposed proxies)",
+        choices: [
+          { name: "Generate automatically  (recommended)", value: "generate" },
+          { name: "Enter my own password",                 value: "manual" },
+          { name: "Skip — no password protection",         value: "skip" },
+        ],
+      });
+
+      let chosenSecret: string | undefined;
+
+      if (pwChoice === "generate") {
+        chosenSecret = generateProxySecret();
+        writeConfig({ ...readConfig(), proxySecret: chosenSecret });
+      } else if (pwChoice === "manual") {
+        const raw = await password({
+          message: "Enter proxy password:",
+          validate: (v) => v.trim().length >= 8 || "Minimum 8 characters",
+        });
+        chosenSecret = raw.trim();
+        writeConfig({ ...readConfig(), proxySecret: chosenSecret });
+      }
+
+      writeClaudeSettings(port, proxyHost);
+
+      if (chosenSecret) {
+        console.log(chalk.yellow("\n  *** Save this password — you cannot recover it later ***"));
+        console.log("      " + chalk.bold(chosenSecret));
+        console.log(chalk.gray("  Claude Code has been configured to use it automatically."));
+        console.log(chalk.gray("  Other machines: cc-router configure --set-password <value>"));
+      } else {
+        console.log(chalk.green(`\n  ✓ ~/.claude/settings.json updated`));
+        console.log(chalk.gray(`      ANTHROPIC_BASE_URL  = ${proxyHost}`));
+        console.log(chalk.gray(`      ANTHROPIC_AUTH_TOKEN = proxy-managed`));
+      }
+
       console.log(chalk.cyan(`\n  On the remote machine, start cc-router with:`));
       console.log(chalk.white(`    HOST=0.0.0.0 cc-router start`));
       console.log(chalk.cyan(`  Or as a service:`));
@@ -274,6 +306,11 @@ async function runPostSetupFlow(accountCount: number): Promise<void> {
       printDone(accountCount);
       return;
     }
+
+    writeClaudeSettings(port, proxyHost);
+    console.log(chalk.green(`\n  ✓ ~/.claude/settings.json updated`));
+    console.log(chalk.gray(`      ANTHROPIC_BASE_URL  = ${proxyHost}`));
+    console.log(chalk.gray(`      ANTHROPIC_AUTH_TOKEN = proxy-managed`));
   }
 
   // 2. Only ask about starting the proxy if it's local

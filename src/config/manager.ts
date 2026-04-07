@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "fs";
-import { CONFIG_DIR, ACCOUNTS_PATH } from "./paths.js";
+import { randomBytes } from "crypto";
+import { CONFIG_DIR, ACCOUNTS_PATH, CONFIG_PATH } from "./paths.js";
 import type { Account, AccountRecord } from "../proxy/types.js";
 
 export function ensureConfigDir(): void {
@@ -42,6 +43,34 @@ export function writeAccountsAtomic(data: unknown[]): void {
 export function loadAccounts(): Account[] {
   return deserialize(readAccountsRaw() as AccountRecord[]);
 }
+
+// ─── Proxy config (password, future settings) ─────────────────────────────────
+
+export interface ProxyConfig {
+  proxySecret?: string;
+}
+
+export function readConfig(): ProxyConfig {
+  if (!existsSync(CONFIG_PATH)) return {};
+  try {
+    return JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as ProxyConfig;
+  } catch {
+    return {};
+  }
+}
+
+export function writeConfig(cfg: ProxyConfig): void {
+  ensureConfigDir();
+  const tmp = CONFIG_PATH + ".tmp";
+  writeFileSync(tmp, JSON.stringify(cfg, null, 2), "utf-8");
+  renameSync(tmp, CONFIG_PATH);
+}
+
+export function generateProxySecret(): string {
+  return "cc-rtr-" + randomBytes(16).toString("hex");
+}
+
+// ─── Accounts ─────────────────────────────────────────────────────────────────
 
 function deserialize(records: AccountRecord[]): Account[] {
   return records.map(a => ({

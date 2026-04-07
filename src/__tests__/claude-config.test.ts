@@ -15,6 +15,7 @@ vi.mock("../config/paths.js", () => ({
   CLAUDE_SETTINGS_PATH: `${MOCK_DIR}/settings.json`,
   CONFIG_DIR: MOCK_DIR,
   ACCOUNTS_PATH: `${MOCK_DIR}/accounts.json`,
+  CONFIG_PATH: `${MOCK_DIR}/config.json`,
   PROXY_PORT: 3456,
   LITELLM_PORT: 4000,
   LITELLM_URL: undefined,

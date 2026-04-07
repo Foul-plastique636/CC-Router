@@ -15,3 +15,8 @@ export const LITELLM_PORT = 4000;
 
 // When set, the server forwards to LiteLLM instead of Anthropic directly
 export const LITELLM_URL = process.env["LITELLM_URL"];
+
+// Proxy-level config (password, future settings) — separate from accounts.json
+export const CONFIG_PATH =
+  process.env["CONFIG_PATH"] ??
+  path.join(CONFIG_DIR, "config.json");
