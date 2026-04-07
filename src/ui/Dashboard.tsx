@@ -226,7 +226,7 @@ function LiveDashboard({ data, port, lastUpdate }: { data: HealthData; port: num
           {visibleLogs.length === 0
             ? <Text color="gray">  No activity yet</Text>
             : visibleLogs.map((log, i) => (
-                <LogRow key={log.ts} log={log} selected={i === selectedIndex} />
+                <LogRow key={`${log.ts}-${i}`} log={log} selected={i === selectedIndex} />
               ))
           }
         </Box>
