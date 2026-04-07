@@ -401,7 +401,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   process.on("SIGINT", shutdown);
 
   // ─── Auto-update (opt-in via config or CC_ROUTER_AUTO_UPDATE=1) ───────────
-  const autoUpdate = readConfig().autoUpdate || process.env["CC_ROUTER_AUTO_UPDATE"] === "1";
+  // Auto-update enabled by default — users can disable via config or env var
+  const cfg = readConfig();
+  const autoUpdate = cfg.autoUpdate !== false && process.env["CC_ROUTER_NO_AUTO_UPDATE"] !== "1";
   if (autoUpdate) {
     const AUTO_UPDATE_INTERVAL = 6 * 60 * 60 * 1000; // 6 hours
     const runAutoUpdate = async () => {

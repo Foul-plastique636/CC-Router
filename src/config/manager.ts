@@ -49,7 +49,7 @@ export function loadAccounts(): Account[] {
 
 export interface ProxyConfig {
   proxySecret?: string;
-  /** When true, the proxy auto-updates itself on patch/minor releases. Default: false. */
+  /** Auto-update on patch/minor releases. Default: true (enabled). Set to false to disable. */
   autoUpdate?: boolean;
 }
 

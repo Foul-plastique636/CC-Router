@@ -315,6 +315,18 @@ async function runPostSetupFlow(accountCount: number): Promise<void> {
     console.log(chalk.gray(`      ANTHROPIC_AUTH_TOKEN = proxy-managed`));
   }
 
+  // ── Auto-update preference ──────────────────────────────────────────────
+  const existingCfg = readConfig();
+  if (existingCfg.autoUpdate === undefined) {
+    const enableAutoUpdate = await confirm({
+      message: "Enable auto-updates? (proxy will install patch/minor releases automatically)",
+      default: true,
+    });
+    writeConfig({ ...existingCfg, autoUpdate: enableAutoUpdate });
+    console.log(chalk.gray(`  Auto-update: ${enableAutoUpdate ? chalk.green("enabled") : chalk.gray("disabled")}`));
+    console.log(chalk.gray("  Change later with: cc-router configure --enable-auto-update / --disable-auto-update"));
+  }
+
   // 2. Only ask about starting the proxy if it's local
   console.log(chalk.bold(`\n${"━".repeat(40)}\n  Start the proxy\n${"━".repeat(40)}\n`));
 

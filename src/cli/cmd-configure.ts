@@ -14,6 +14,8 @@ export function registerConfigure(program: Command): void {
     .option("--generate-password", "Generate a new proxy secret and sync Claude Code settings")
     .option("--set-password <secret>", "Set a specific proxy secret and sync Claude Code settings")
     .option("--remove-password", "Remove proxy password protection (open access)")
+    .option("--enable-auto-update", "Enable automatic updates for the proxy")
+    .option("--disable-auto-update", "Disable automatic updates for the proxy")
     .action((opts: {
       remove?: boolean;
       port: string;
@@ -21,6 +23,8 @@ export function registerConfigure(program: Command): void {
       generatePassword?: boolean;
       setPassword?: string;
       removePassword?: boolean;
+      enableAutoUpdate?: boolean;
+      disableAutoUpdate?: boolean;
     }) => {
       if (opts.show) {
         const current = readClaudeProxySettings();
@@ -32,9 +36,28 @@ export function registerConfigure(program: Command): void {
           console.log(chalk.yellow("  Claude Code is NOT configured to use cc-router."));
           console.log(chalk.gray(`  Run: cc-router configure`));
         }
-        const { proxySecret } = readConfig();
-        const pwStatus = proxySecret ? chalk.green("yes") : chalk.gray("no");
+        const cfg = readConfig();
+        const pwStatus = cfg.proxySecret ? chalk.green("yes") : chalk.gray("no");
+        const autoUpdateEnabled = cfg.autoUpdate !== false;
+        const auStatus = autoUpdateEnabled ? chalk.green("enabled") : chalk.gray("disabled");
         console.log(`    Password protected:  ${pwStatus}`);
+        console.log(`    Auto-update:         ${auStatus}`);
+        return;
+      }
+
+      if (opts.enableAutoUpdate) {
+        writeConfig({ ...readConfig(), autoUpdate: true });
+        console.log(chalk.green("✓ Auto-update enabled."));
+        console.log(chalk.gray("  The proxy will check for updates every 6h and install patch/minor releases."));
+        console.log(chalk.gray("  Restart cc-router for the change to take effect."));
+        return;
+      }
+
+      if (opts.disableAutoUpdate) {
+        writeConfig({ ...readConfig(), autoUpdate: false });
+        console.log(chalk.green("✓ Auto-update disabled."));
+        console.log(chalk.gray("  Use `cc-router update` to update manually."));
+        console.log(chalk.gray("  Restart cc-router for the change to take effect."));
         return;
       }
 
