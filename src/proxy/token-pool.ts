@@ -1,5 +1,12 @@
 import type { Account } from "./types.js";
 
+/** Returns the earliest non-zero reset timestamp (seconds) for an account. */
+function earliestReset(a: Account): number {
+  const r = a.rateLimits;
+  if (r.fiveHourReset && r.sevenDayReset) return Math.min(r.fiveHourReset, r.sevenDayReset);
+  return r.fiveHourReset || r.sevenDayReset || Infinity;
+}
+
 export class TokenPool {
   private accounts: Account[];
   private currentIndex = 0;
@@ -9,21 +16,27 @@ export class TokenPool {
   }
 
   /**
-   * Round-robin selection among healthy, non-busy accounts.
-   * Falls back to least-loaded if all are busy.
+   * Round-robin selection among healthy, non-busy, non-rate-limited accounts.
+   * Falls back to least-loaded if all are busy/limited.
+   * When all are rate-limited, picks the one with the earliest reset.
    * Falls back to accounts[0] if all are unhealthy.
    */
   getNext(): Account {
-    const available = this.accounts.filter(a => a.healthy && !a.busy);
+    const available = this.accounts.filter(a =>
+      a.healthy && !a.busy && a.rateLimits.status !== "rate_limited"
+    );
 
     if (available.length === 0) {
       const healthy = this.accounts.filter(a => a.healthy);
       if (healthy.length === 0) {
-        // Complete fallback: nothing healthy — return first account and hope it recovers
         return this.accounts[0];
       }
-      // All healthy but busy — return least loaded
-      return healthy.reduce((a, b) => a.requestCount < b.requestCount ? a : b);
+      // All healthy but busy/limited — pick earliest reset time
+      return healthy.reduce((best, a) => {
+        const resetA = earliestReset(a);
+        const resetBest = earliestReset(best);
+        return resetA < resetBest ? a : best;
+      });
     }
 
     const account = available[this.currentIndex % available.length];
@@ -51,6 +64,7 @@ export class TokenPool {
       expiresInMs: a.tokens.expiresAt - Date.now(),
       lastUsedMs: a.lastUsed,
       lastRefreshMs: a.lastRefresh,
+      rateLimits: a.rateLimits,
     }));
   }
 }

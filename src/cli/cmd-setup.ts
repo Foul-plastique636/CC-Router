@@ -16,6 +16,7 @@ import { saveAccounts } from "../proxy/token-refresher.js";
 import { loadAccounts, accountsFileExists, readConfig, writeConfig, generateProxySecret } from "../config/manager.js";
 import { PROXY_PORT } from "../config/paths.js";
 import type { Account, OAuthTokens } from "../proxy/types.js";
+import { DEFAULT_RATE_LIMITS } from "../proxy/types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -118,6 +119,7 @@ export async function setupSingleAccount(index: number): Promise<Account | null>
     lastUsed: 0,
     lastRefresh: 0,
     consecutiveErrors: 0,
+    rateLimits: { ...DEFAULT_RATE_LIMITS },
   };
 }
 

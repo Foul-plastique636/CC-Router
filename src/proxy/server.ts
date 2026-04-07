@@ -12,7 +12,7 @@ import { logRoute, logError, logStartup } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL } from "../config/paths.js";
-import type { Account } from "./types.js";
+import type { Account, AccountRateLimits } from "./types.js";
 import chalk from "chalk";
 
 // Augment Request to carry the selected account and pending log entry
@@ -47,6 +47,35 @@ function applyInputUsage(entry: LogEntry, usage: Record<string, number>): void {
 function applyOutputUsage(entry: LogEntry, usage: Record<string, number>): void {
   entry.outputTokens = usage["output_tokens"] ?? 0;
   stats.totalOutputTokens += entry.outputTokens;
+}
+
+// ─── Rate limit header extraction ──────────────────────────────────────────
+
+function inferPlan(requestsLimit: number): string {
+  if (requestsLimit <= 0) return "";
+  if (requestsLimit <= 100) return "Pro";
+  if (requestsLimit <= 500) return "Max 5x";
+  return "Max 20x";
+}
+
+function extractRateLimits(headers: Record<string, string | string[] | undefined>): AccountRateLimits | null {
+  const h = (name: string) => String(headers[name] ?? "");
+  const status = h("anthropic-ratelimit-unified-status");
+  if (!status) return null; // No unified headers in this response
+
+  const requestsLimit = parseInt(h("anthropic-ratelimit-requests-limit"), 10) || 0;
+
+  return {
+    status: status === "rate_limited" ? "rate_limited" : "allowed",
+    fiveHourUtil: parseFloat(h("anthropic-ratelimit-unified-5h-utilization")) || 0,
+    fiveHourReset: parseInt(h("anthropic-ratelimit-unified-5h-reset"), 10) || 0,
+    sevenDayUtil: parseFloat(h("anthropic-ratelimit-unified-7d-utilization")) || 0,
+    sevenDayReset: parseInt(h("anthropic-ratelimit-unified-7d-reset"), 10) || 0,
+    claim: h("anthropic-ratelimit-unified-representative-claim"),
+    plan: inferPlan(requestsLimit),
+    requestsLimit,
+    lastUpdated: Date.now(),
+  };
 }
 
 export async function startServer(opts: ServerOptions = {}): Promise<void> {
@@ -224,6 +253,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           account.busy = true;
           setTimeout(() => { account.busy = false; }, 30_000);
         }
+
+        // ── Capture rate limit utilization from response headers ────────────
+        const rl = extractRateLimits(proxyRes.headers as Record<string, string | string[] | undefined>);
+        if (rl) account.rateLimits = rl;
 
         const entry = pendingLog as LogEntry;
         stats.addLog(entry);

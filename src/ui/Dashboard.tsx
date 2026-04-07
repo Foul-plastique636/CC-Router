@@ -7,6 +7,18 @@ const LOG_VISIBLE = 20;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+interface AccountRateLimitsView {
+  status: string;
+  fiveHourUtil: number;
+  fiveHourReset: number;
+  sevenDayUtil: number;
+  sevenDayReset: number;
+  claim: string;
+  plan: string;
+  requestsLimit: number;
+  lastUpdated: number;
+}
+
 interface AccountStat {
   id: string;
   healthy: boolean;
@@ -16,6 +28,7 @@ interface AccountStat {
   expiresInMs: number;
   lastUsedMs: number;
   lastRefreshMs: number;
+  rateLimits: AccountRateLimitsView;
 }
 
 interface HealthData {
@@ -225,34 +238,82 @@ function LiveDashboard({ data, port, lastUpdate }: { data: HealthData; port: num
   );
 }
 
-// ─── Account row ──────────────────────────────────────────────────────────────
+// ─── Account row (two-line: status + utilization bars) ───────────────────────
 
 function AccountRow({ account: a }: { account: AccountStat }) {
-  const dot = a.busy ? "◌" : a.healthy ? "●" : "●";
-  const dotColor = a.busy ? "yellow" : a.healthy ? "green" : "red";
-  const statusLabel = a.busy ? "busy   " : a.healthy ? "ok     " : "ERROR  ";
-  const statusColor = a.busy ? "yellow" : a.healthy ? "green" : "red";
+  const rl = a.rateLimits;
+  const isLimited = rl.status === "rate_limited";
+
+  const dot = isLimited ? "⊘" : a.busy ? "◌" : a.healthy ? "●" : "●";
+  const dotColor = isLimited ? "red" : a.busy ? "yellow" : a.healthy ? "green" : "red";
+  const statusLabel = isLimited ? "LIMITED" : a.busy ? "busy   " : a.healthy ? "ok     " : "ERROR  ";
+  const statusColor = isLimited ? "red" : a.busy ? "yellow" : a.healthy ? "green" : "red";
 
   const expiryLabel = a.expiresInMs > 0 ? formatMs(a.expiresInMs) : "EXPIRED";
   const expiryColor = a.expiresInMs < 10 * 60 * 1000 ? "red"
     : a.expiresInMs < 30 * 60 * 1000 ? "yellow"
     : "white";
 
+  const planTag = rl.plan ? ` [${rl.plan}]` : "";
+
   return (
-    <Box>
-      <Text color={dotColor}> {dot} </Text>
-      <Text>{a.id.slice(0, 22).padEnd(22)}</Text>
-      <Text color={statusColor}>{statusLabel}</Text>
-      <Text color="gray"> req </Text>
-      <Text color="white">{String(a.requestCount).padStart(5)}</Text>
-      <Text color="gray">  err </Text>
-      <Text color={a.errorCount > 0 ? "red" : "gray"}>{String(a.errorCount).padStart(3)}</Text>
-      <Text color="gray">  expires </Text>
-      <Text color={expiryColor}>{expiryLabel.padEnd(10)}</Text>
-      <Text color="gray">  last </Text>
-      <Text color="gray">{formatAgo(a.lastUsedMs)}</Text>
+    <Box flexDirection="column">
+      <Box>
+        <Text color={dotColor}> {dot} </Text>
+        <Text>{a.id.slice(0, 20).padEnd(20)}</Text>
+        <Text color={statusColor}>{statusLabel}</Text>
+        {planTag && <Text color="magenta">{planTag.padEnd(10)}</Text>}
+        {!planTag && <Text>{"".padEnd(10)}</Text>}
+        <Text color="gray"> req </Text>
+        <Text color="white">{String(a.requestCount).padStart(5)}</Text>
+        <Text color="gray">  err </Text>
+        <Text color={a.errorCount > 0 ? "red" : "gray"}>{String(a.errorCount).padStart(3)}</Text>
+        <Text color="gray">  tok </Text>
+        <Text color={expiryColor}>{expiryLabel.padEnd(8)}</Text>
+        <Text color="gray">  last </Text>
+        <Text color="gray">{formatAgo(a.lastUsedMs)}</Text>
+      </Box>
+      {rl.lastUpdated > 0 && (
+        <Box paddingLeft={4}>
+          <UtilBar label="5h" util={rl.fiveHourUtil} resetTs={rl.fiveHourReset} isActive={rl.claim === "five_hour"} />
+          <Text>   </Text>
+          <UtilBar label="7d" util={rl.sevenDayUtil} resetTs={rl.sevenDayReset} isActive={rl.claim === "seven_day"} />
+        </Box>
+      )}
     </Box>
   );
+}
+
+// ─── Utilization bar ─────────────────────────────────────────────────────────
+
+function UtilBar({ label, util, resetTs, isActive }: { label: string; util: number; resetTs: number; isActive: boolean }) {
+  const pct = Math.round(util * 100);
+  const BAR_W = 12;
+  const filled = Math.round(util * BAR_W);
+  const bar = "█".repeat(Math.min(filled, BAR_W)) + "░".repeat(Math.max(BAR_W - filled, 0));
+  const color = pct >= 90 ? "red" : pct >= 70 ? "yellow" : "green";
+
+  const resetLabel = resetTs > 0 ? formatResetIn(resetTs) : "";
+
+  return (
+    <Box>
+      <Text color={isActive ? "white" : "gray"} bold={isActive}>{label} </Text>
+      <Text color={color}>{bar}</Text>
+      <Text color={color}>{String(pct).padStart(4)}%</Text>
+      {resetLabel && <Text color="gray"> ↻{resetLabel}</Text>}
+    </Box>
+  );
+}
+
+function formatResetIn(unixSeconds: number): string {
+  const diff = unixSeconds - Date.now() / 1000;
+  if (diff <= 0) return "now";
+  const d = Math.floor(diff / 86400);
+  const h = Math.floor((diff % 86400) / 3600);
+  const m = Math.floor((diff % 3600) / 60);
+  if (d > 0) return `${d}d${h}h`;
+  if (h > 0) return `${h}h${m}m`;
+  return `${m}m`;
 }
 
 // ─── Log row ──────────────────────────────────────────────────────────────────

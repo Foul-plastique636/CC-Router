@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "
 import { randomBytes } from "crypto";
 import { CONFIG_DIR, ACCOUNTS_PATH, CONFIG_PATH } from "./paths.js";
 import type { Account, AccountRecord } from "../proxy/types.js";
+import { DEFAULT_RATE_LIMITS } from "../proxy/types.js";
 
 export function ensureConfigDir(): void {
   if (!existsSync(CONFIG_DIR)) {
@@ -88,5 +89,6 @@ function deserialize(records: AccountRecord[]): Account[] {
     lastUsed: 0,
     lastRefresh: 0,
     consecutiveErrors: 0,
+    rateLimits: { ...DEFAULT_RATE_LIMITS },
   }));
 }
