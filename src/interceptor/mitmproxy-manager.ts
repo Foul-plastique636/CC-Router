@@ -142,7 +142,7 @@ export function writeAddonScript(target: string): void {
     const src = readFileSync(bundled, "utf-8");
     writeFileSync(ADDON_PATH, src, "utf-8");
   } else {
-    // Inline fallback — minimal addon
+    // Inline fallback — minimal addon (only redirects /v1/messages and /v1/models)
     const script = `
 import os
 from mitmproxy import http
@@ -150,9 +150,12 @@ from urllib.parse import urlparse
 
 _target = os.environ.get("CC_ROUTER_TARGET", ${JSON.stringify(target)}).rstrip("/")
 _p = urlparse(_target)
+_REDIRECT_PREFIXES = ("/v1/messages", "/v1/models")
 
 def request(flow: http.HTTPFlow) -> None:
     if flow.request.pretty_host != "api.anthropic.com":
+        return
+    if not flow.request.path.startswith(_REDIRECT_PREFIXES):
         return
     flow.request.scheme = _p.scheme
     flow.request.host = _p.hostname or "localhost"
