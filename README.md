@@ -7,6 +7,21 @@ Distribute Claude Code requests across N subscriptions to multiply your throughp
 [![npm](https://img.shields.io/npm/v/ai-cc-router)](https://www.npmjs.com/package/ai-cc-router)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+### Features
+
+- **Round-robin token rotation** — distribute requests across 2-20 Claude Max accounts automatically
+- **Transparent proxy** — Claude Code works normally; streaming, thinking, tool use, prompt caching all pass through
+- **Automatic token refresh** — OAuth tokens are refreshed before they expire, saved atomically to disk
+- **Rate limit awareness** — detects 429/529 responses and coolsdown accounts; picks the least-loaded one
+- **Client mode** — connect to a remote CC-Router from any machine with one command (`cc-router client connect <url>`)
+- **Claude Desktop support** — route Cowork / Agent-mode traffic through CC-Router via mitmproxy interception (macOS, Windows, Linux)
+- **Guided setup wizard** — interactive `cc-router setup` extracts tokens from Keychain or credentials file, configures everything
+- **Live dashboard** — real-time terminal UI showing account health, request counts, token usage, recent activity
+- **Proxy authentication** — optional Bearer / x-api-key secret for internet-exposed deployments
+- **Auto-update** — patch/minor releases install automatically (opt-out available)
+- **Multiple deployment modes** — foreground, PM2 daemon, system service, Docker Compose (with LiteLLM)
+- **Cross-platform** — macOS, Linux, Windows; Node.js 20+
+
 ---
 
 > **Warning**  
