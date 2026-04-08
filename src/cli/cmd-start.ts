@@ -3,6 +3,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import chalk from "chalk";
 import { PROXY_PORT, LITELLM_PORT, ACCOUNTS_PATH } from "../config/paths.js";
+import { showTelemetryDisclosureIfNeeded } from "../utils/telemetry.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -16,6 +17,9 @@ export function registerStart(program: Command): void {
     .option("--accounts <path>", "Path to accounts.json", ACCOUNTS_PATH)
     .action(async (opts: { port: string; daemon?: boolean; litellm?: string | boolean; accounts: string }) => {
       if (opts.daemon) {
+        // Show telemetry disclosure in the user's terminal before handing off
+        // to PM2 — once the daemon starts, its stdout goes to PM2 logs.
+        showTelemetryDisclosureIfNeeded();
         await startDaemon();
         return;
       }

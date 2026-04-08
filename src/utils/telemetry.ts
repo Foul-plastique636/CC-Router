@@ -1,5 +1,6 @@
 import os from "os";
-import { isTelemetryEnabled, loadTelemetryState } from "../config/telemetry.js";
+import chalk from "chalk";
+import { isTelemetryEnabled, loadTelemetryState, writeTelemetryState } from "../config/telemetry.js";
 import { detectPlatform } from "./platform.js";
 import { getCurrentVersion } from "./self-update.js";
 
@@ -106,4 +107,33 @@ export function startHeartbeat(accountCount: number): void {
     });
   }, 6 * 60 * 60 * 1000);
   timer.unref();
+}
+
+// One-time disclosure shown the very first time CC-Router runs after install
+// or upgrade. Idempotent — gated by telemetry.disclosureShown so it's safe to
+// call from multiple entry points (setup wizard, foreground start, daemon
+// start, service install). Returns true if the disclosure was just shown.
+export function showTelemetryDisclosureIfNeeded(): boolean {
+  try {
+    const state = loadTelemetryState();
+    if (state.disclosureShown) return false;
+    console.log();
+    console.log(chalk.dim("─".repeat(60)));
+    console.log(chalk.bold("  Anonymous usage analytics"));
+    console.log();
+    console.log("  CC-Router sends anonymous lifecycle events (version, OS,");
+    console.log("  startup, heartbeat) to help us understand usage and prioritize");
+    console.log("  improvements. No IPs, no tokens, no prompts, no request content.");
+    console.log();
+    console.log(`  Disable:    ${chalk.cyan("cc-router telemetry off")}`);
+    console.log(`  Or set:     ${chalk.cyan("DO_NOT_TRACK=1")}   |   ${chalk.cyan("CC_ROUTER_TELEMETRY=0")}`);
+    console.log(`  Source:     ${chalk.dim("src/utils/telemetry.ts")}`);
+    console.log(chalk.dim("─".repeat(60)));
+    console.log();
+    state.disclosureShown = true;
+    writeTelemetryState(state);
+    return true;
+  } catch {
+    return false;
+  }
 }
