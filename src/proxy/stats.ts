@@ -8,6 +8,7 @@ export interface LogEntry {
   durationMs?: number;
   method?: string;
   path?: string;
+  source?: "cli" | "desktop" | "api";
   // Token usage from Anthropic response (message_start + message_delta events)
   cacheReadTokens?: number;
   cacheCreationTokens?: number;

@@ -357,6 +357,14 @@ function LogRow({ log, selected }: { log: LogEntry; selected: boolean }) {
   const bg = selected ? "white" : undefined;
   const fg = (c: string | undefined) => selected ? "black" : c;
 
+  const sourceLabel = log.source === "cli" ? "cli"
+    : log.source === "desktop" ? "dsk"
+    : log.source === "api" ? "api"
+    : "   ";
+  const sourceColor = log.source === "cli" ? "blue"
+    : log.source === "desktop" ? "magenta"
+    : "gray";
+
   // Per-request token stats
   const inputTok = (log.cacheReadTokens ?? 0) + (log.cacheCreationTokens ?? 0) + (log.inputTokens ?? 0);
   const outputTok = log.outputTokens ?? 0;
@@ -372,6 +380,7 @@ function LogRow({ log, selected }: { log: LogEntry; selected: boolean }) {
         {selected ? "▶" : " "}{" "}{time}{"  "}
       </Text>
       <Text backgroundColor={bg} color={fg(typeColor)}>{typeIcon} </Text>
+      <Text backgroundColor={bg} color={fg(sourceColor)}>{sourceLabel} </Text>
       <Text backgroundColor={bg} color={fg("cyan")}>{log.accountId.slice(0, 22).padEnd(22)}</Text>
       {log.method && log.path
         ? <Text backgroundColor={bg} color={fg("white")}> {log.method} {log.path.padEnd(14)}</Text>
@@ -430,6 +439,7 @@ function DetailPanel({ log }: { log: LogEntry }) {
           <FieldColored label="Status"   value={statusLabel} color={statusColor} />
           <Field        label="Duration" value={log.durationMs !== undefined ? `${log.durationMs}ms` : "—"} />
           <Field        label="Type"     value={log.type} />
+          <Field        label="Source"   value={sourceFullLabel(log.source)} />
         </Box>
         {log.details && (
           <Box>
@@ -543,6 +553,15 @@ function fmtTok(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
+}
+
+// ─── Source label ─────────────────────────────────────────────────────────────
+
+function sourceFullLabel(source: LogEntry["source"]): string {
+  if (source === "cli") return "Claude Code";
+  if (source === "desktop") return "Claude Desktop";
+  if (source === "api") return "API";
+  return "—";
 }
 
 // ─── HTTP status text ─────────────────────────────────────────────────────────

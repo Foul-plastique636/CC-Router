@@ -49,6 +49,7 @@ interface RemoteHealth {
     statusCode?: number;
     durationMs?: number;
     type?: string;
+    source?: "cli" | "desktop" | "api";
   }>;
 }
 
@@ -271,8 +272,12 @@ export function registerClient(program: Command): void {
           const status = log.statusCode ?? 0;
           const statusColor = status >= 500 || status === 0 ? chalk.red : status >= 400 ? chalk.yellow : chalk.green;
           const duration = log.durationMs ? ` ${chalk.gray(log.durationMs + "ms")}` : "";
+          const src = log.source === "cli" ? chalk.blue("cli")
+            : log.source === "desktop" ? chalk.magenta("dsk")
+            : log.source === "api" ? chalk.gray("api")
+            : chalk.gray("   ");
           console.log(
-            `    ${chalk.gray(formatTime(log.ts))}  ${log.accountId.padEnd(18)}  ` +
+            `    ${chalk.gray(formatTime(log.ts))}  ${src} ${log.accountId.padEnd(18)}  ` +
             `${(log.method ?? "?").padEnd(5)} ${(log.path ?? "?").padEnd(22)}  ` +
             `${statusColor(String(status))}${duration}`,
           );

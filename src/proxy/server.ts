@@ -370,6 +370,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
     req._ccAccount = account;
     req._startTime = Date.now();
+    const source = req.headers["x-claude-code-session-id"]
+      ? "cli" as const
+      : req.headers["x-api-key"]
+      ? "desktop" as const
+      : "api" as const;
+
     req._pendingLog = {
       ts: Date.now(),
       accountId: account.id,
@@ -377,6 +383,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       type: "route",
       method: req.method,
       path: req.path,
+      source,
     };
     stats.totalRequests++;
 
