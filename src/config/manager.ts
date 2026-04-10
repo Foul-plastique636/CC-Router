@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, copyFileSync } from "fs";
 import { randomBytes } from "crypto";
 import { CONFIG_DIR, ACCOUNTS_PATH, CONFIG_PATH } from "./paths.js";
 import type { Account, AccountRecord } from "../proxy/types.js";
@@ -62,19 +62,38 @@ export interface ClientConfig {
   desktopEnabled?: boolean;
 }
 
+/** Persisted run preferences — asked once on first `cc-router start`, reused afterwards. */
+export interface RunPreferences {
+  /** How the proxy runs: foreground terminal, detached background, or OS-level auto-start service */
+  mode: "foreground" | "background" | "service";
+  /** Bind to 0.0.0.0 (true) vs 127.0.0.1 (false) — true when serving other devices on the network */
+  serverMode: boolean;
+  /** Port to listen on (default 3456) */
+  port: number;
+}
+
 export interface ProxyConfig {
   proxySecret?: string;
   /** Auto-update on patch/minor releases. Default: true (enabled). Set to false to disable. */
   autoUpdate?: boolean;
   /** Present only when this machine is in "client" mode (connected to a remote CC-Router) */
   client?: ClientConfig;
+  /** Run preferences — asked once on first start, reused on subsequent starts */
+  runPreferences?: RunPreferences;
 }
 
 export function readConfig(): ProxyConfig {
   if (!existsSync(CONFIG_PATH)) return {};
   try {
     return JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as ProxyConfig;
-  } catch {
+  } catch (err) {
+    console.warn(`Warning: ${CONFIG_PATH} contains invalid JSON: ${(err as Error).message}`);
+    try {
+      const backupPath = CONFIG_PATH + ".bak";
+      copyFileSync(CONFIG_PATH, backupPath);
+      console.warn(`  Backup saved to ${backupPath}`);
+    } catch { /* best-effort backup */ }
+    console.warn(`  Using default configuration for this session.`);
     return {};
   }
 }
