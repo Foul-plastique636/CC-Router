@@ -225,7 +225,7 @@ async function ensureClaudeCodeConfigured(
 async function maybeUpdate(): Promise<void> {
   let check;
   try {
-    check = await checkForUpdate();
+    check = await checkForUpdate(true);  // force fresh check, skip disk cache
     if (!check.updateAvailable) return;
   } catch {
     return; // network check is non-critical
