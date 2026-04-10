@@ -3,9 +3,10 @@
 **Round-robin proxy for multiple Claude Max accounts.**  
 Distribute Claude Code requests across N subscriptions to multiply your throughput.
 
-[![CI](https://github.com/VictorMinemu/CC-Router/actions/workflows/ci.yml/badge.svg)](https://github.com/VictorMinemu/CC-Router/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/ai-cc-router)](https://www.npmjs.com/package/ai-cc-router)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+![CC-Router Dashboard](assets/dashboard.png)
 
 ### Features
 
@@ -19,7 +20,7 @@ Distribute Claude Code requests across N subscriptions to multiply your throughp
 - **Live dashboard** — real-time terminal UI showing account health, request counts, token usage, recent activity
 - **Proxy authentication** — optional Bearer / x-api-key secret for internet-exposed deployments
 - **Auto-update** — patch/minor releases install automatically (opt-out available)
-- **Multiple deployment modes** — foreground, PM2 daemon, system service, Docker Compose (with LiteLLM)
+- **Multiple deployment modes** — background daemon, native OS auto-start (launchd/systemd), foreground, Docker Compose
 - **Cross-platform** — macOS, Linux, Windows; Node.js 20+
 
 ---
@@ -114,17 +115,10 @@ Run cc-router on a machine everyone on the team can reach — a home server, a V
 ```bash
 npm install -g ai-cc-router
 cc-router setup          # configure the 3 shared accounts
-cc-router service install # auto-start on boot
+cc-router start          # first run asks: background/boot/server mode — choose "server mode"
 ```
 
-By default cc-router binds to `localhost`. To accept connections from other machines, set the `HOST` environment variable:
-
-```bash
-# Listen on all interfaces (team LAN or VPS)
-HOST=0.0.0.0 cc-router start
-
-# Or configure it permanently in the service
-```
+When you enable server mode during `cc-router start`, the proxy automatically binds to all interfaces (`0.0.0.0`) and prints instructions for connecting clients.
 
 #### On each developer's machine
 
@@ -204,9 +198,9 @@ claude
 
 That's it. Claude Code will route through the proxy without any further changes.
 
-**Optional:** install as a system service so it starts automatically on boot:
+On first run, `cc-router start` asks how you want to run (background/foreground, auto-start on boot, server mode) and remembers your choice. Next time, it just starts. To change preferences later:
 ```bash
-cc-router service install
+cc-router start --reconfigure
 ```
 
 ---
@@ -274,25 +268,26 @@ cc-router setup
 cc-router setup              Interactive wizard: extract tokens + configure Claude Code
 cc-router setup --add        Add another account to an existing configuration
 
-cc-router start              Start proxy on localhost:3456 (foreground)
-cc-router start --daemon     Start in background via PM2
+cc-router start              Start proxy (asks preferences on first run, then remembers)
+cc-router start --foreground Run in the foreground (stays in terminal)
+cc-router start --reconfigure  Re-ask run preferences (background/service/server mode)
 cc-router start --litellm    Start with LiteLLM in Docker (advanced mode)
 
-cc-router stop               Stop proxy + restore Claude Code to normal auth
+cc-router stop               Stop proxy (offers to remove auto-start / config)
 cc-router stop --keep-config Stop proxy only (keep settings.json)
-cc-router revert             Restore Claude Code to normal authentication
+cc-router stop --full        Stop + remove auto-start + revert Claude Code (no prompts)
+cc-router revert             Same as stop --full
 
 cc-router status             Live dashboard (updates every 2s, press q to quit)
 cc-router status --json      Print current stats as JSON and exit
 
+cc-router logs               View proxy logs (background mode)
+cc-router logs -f            Follow log output in real time
+cc-router logs --lines 100   Show last 100 lines
+
 cc-router accounts list      List configured accounts (live stats if proxy is running)
 cc-router accounts add       Add an account interactively
 cc-router accounts remove <id>  Remove an account
-
-cc-router service install    Register cc-router to start on system boot (PM2)
-cc-router service uninstall  Remove from system startup
-cc-router service status     Show PM2 service status
-cc-router service logs       Tail proxy logs from PM2
 
 cc-router configure          (Re)write ~/.claude/settings.json
 cc-router configure --show   Show current Claude Code proxy settings
@@ -323,7 +318,7 @@ cc-router docker restart [service]  Restart a service
 Claude Code → cc-router:3456 → api.anthropic.com
 ```
 
-Best for personal use. No Docker required.
+Best for personal use. No Docker required. Runs in the background by default, auto-starts on boot if you choose.
 
 ```bash
 cc-router start
@@ -477,7 +472,9 @@ To stop using cc-router and go back to normal Claude Code authentication:
 cc-router revert
 ```
 
-This stops the proxy process and removes cc-router's settings from `~/.claude/settings.json`. Claude Code will use its own authentication on the next launch.
+This stops the proxy process, removes the auto-start service (if installed), and removes cc-router's settings from `~/.claude/settings.json`. Claude Code will use its own authentication on the next launch.
+
+For a gentler approach, `cc-router stop` interactively asks what you want to clean up.
 
 ---
 
@@ -530,7 +527,7 @@ CC-Router sends a handful of anonymous lifecycle events to [Aptabase](https://ap
 | `app_started`        | First proxy start after install                 | `first_run: true`                        |
 | `setup_completed`    | Setup wizard finishes successfully               | `account_count`                          |
 | `proxy_started`      | Each `cc-router start`                           | `account_count`, `mode`                  |
-| `proxy_heartbeat`    | Every 6h while the proxy is running              | `uptime_hours`, `account_count`          |
+| `proxy_heartbeat`    | Every hour while the proxy is running              | `uptime_minutes`, `account_count`        |
 | `telemetry_disabled` | When you run `cc-router telemetry off`           | —                                        |
 
 Plus anonymous system props with every event: `appVersion`, `osName` (macOS/Linux/Windows), `osVersion`, `locale`, `engineVersion` (Node), and an anonymous `installId` (random UUID generated on first run, stored in `~/.cc-router/telemetry.json`).
