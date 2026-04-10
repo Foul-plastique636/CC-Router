@@ -5,12 +5,12 @@ import { registerStart } from "./cmd-start.js";
 import { registerStop, registerRevert } from "./cmd-stop.js";
 import { registerStatus } from "./cmd-status.js";
 import { registerAccounts } from "./cmd-accounts.js";
-import { registerService } from "./cmd-service.js";
 import { registerConfigure } from "./cmd-configure.js";
 import { registerDocker } from "./cmd-docker.js";
 import { registerUpdate } from "./cmd-update.js";
 import { registerClient } from "./cmd-client.js";
 import { registerTelemetry } from "./cmd-telemetry.js";
+import { registerLogs } from "./cmd-logs.js";
 import { getCurrentVersion, checkForUpdate, printUpdateBanner } from "../utils/self-update.js";
 
 const program = new Command();
@@ -25,16 +25,16 @@ program
   .addHelpText("after", `
 Examples:
   $ cc-router setup              # First-time wizard: extract tokens + configure Claude Code
-  $ cc-router start              # Start proxy on localhost:3456
-  $ cc-router start --daemon     # Start in background via PM2
+  $ cc-router start              # Start proxy (asks preferences on first run, then remembers)
+  $ cc-router start --foreground # Start in foreground (this terminal)
+  $ cc-router start --reconfigure# Re-ask run preferences
+  $ cc-router stop               # Stop proxy (offers to remove auto-start / config)
   $ cc-router status             # Live dashboard with account stats
-  $ cc-router service install    # Auto-start on system boot
+  $ cc-router logs               # View proxy logs (background mode)
   $ cc-router accounts list      # Show all configured accounts
-  $ cc-router revert             # Restore Claude Code to normal (remove proxy config)
+  $ cc-router revert             # Restore Claude Code to normal (remove all proxy config)
   $ cc-router docker up          # Full stack: cc-router + LiteLLM in Docker
-  $ cc-router docker down        # Stop Docker stack
   $ cc-router client connect <url>   # Route Claude Code through a remote CC-Router
-  $ cc-router client start-desktop   # Route Claude Desktop via mitmproxy interceptor
 `);
 
 registerSetup(program);
@@ -43,12 +43,12 @@ registerStop(program);
 registerRevert(program);
 registerStatus(program);
 registerAccounts(program);
-registerService(program);
 registerConfigure(program);
 registerDocker(program);
 registerUpdate(program);
 registerClient(program);
 registerTelemetry(program);
+registerLogs(program);
 
 // Background update check — fires on every CLI invocation, uses 6h disk cache
 // so it's essentially free after the first check. Notify on process exit.
