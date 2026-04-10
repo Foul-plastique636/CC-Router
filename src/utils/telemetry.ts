@@ -55,14 +55,11 @@ function getSystemProps(): SystemProps {
   };
 }
 
-// Session ID groups events from the same install within an hourly window,
-// without leaking timing precision finer than 1h.
-// Aptabase limits sessionId to 36 characters. A UUID with dashes is already 36,
-// so we strip dashes and take the first 24 hex chars + epochHours (~6-7 digits).
+// Session ID — use the installId directly so Aptabase always identifies the
+// same machine as the same user.  Aptabase limits sessionId to 36 characters;
+// a standard UUID with dashes is exactly 36, so we pass it through unchanged.
 function getSessionId(installId: string): string {
-  const epochHours = Math.floor(Date.now() / 3_600_000);
-  const shortId = installId.replace(/-/g, "").slice(0, 24);
-  return `${shortId}${epochHours}`;
+  return installId.slice(0, 36);
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -99,17 +96,17 @@ export async function trackEvent(
   }
 }
 
-// Start a heartbeat that fires every 6 hours while the proxy is running.
+// Start a heartbeat that fires every hour while the proxy is running.
 // Uses .unref() so the timer does not prevent Node from exiting.
 export function startHeartbeat(accountCount: number): void {
   const startTime = Date.now();
   const timer = setInterval(() => {
-    const uptimeHours = Math.floor((Date.now() - startTime) / 3_600_000);
+    const uptimeMinutes = Math.floor((Date.now() - startTime) / 60_000);
     trackEvent("proxy_heartbeat", {
-      uptime_hours: uptimeHours,
+      uptime_minutes: uptimeMinutes,
       account_count: accountCount,
     });
-  }, 6 * 60 * 60 * 1000);
+  }, 60 * 60 * 1000);
   timer.unref();
 }
 

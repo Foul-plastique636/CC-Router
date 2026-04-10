@@ -167,9 +167,8 @@ describe("trackEvent", () => {
     expect(body.systemProps.osName).toMatch(/^(macOS|Linux|Windows)$/);
     expect(body.systemProps.engineName).toBe("node");
     expect(body.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    // sessionId = first 24 hex chars of installId (no dashes) + epochHours
-    const installHex = loadTelemetryState().installId.replace(/-/g, "").slice(0, 24);
-    expect(body.sessionId).toContain(installHex);
+    // sessionId = installId (UUID, max 36 chars) — persistent per machine
+    expect(body.sessionId).toBe(loadTelemetryState().installId.slice(0, 36));
     expect(body.sessionId.length).toBeLessThanOrEqual(36);
   });
 
