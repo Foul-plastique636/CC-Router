@@ -1,7 +1,5 @@
 import type { Command } from "commander";
 import { select, input, confirm, password } from "@inquirer/prompts";
-import { execFile, spawn } from "child_process";
-import { promisify } from "util";
 import chalk from "chalk";
 import { detectPlatform, isMacos } from "../utils/platform.js";
 import {
@@ -29,8 +27,6 @@ import {
 } from "../interceptor/mitmproxy-manager.js";
 import { printDesktopSupportExplainer, printNetworkExtensionInstructions } from "./cmd-client.js";
 import { trackEvent } from "../utils/telemetry.js";
-
-const execFileAsync = promisify(execFile);
 
 // ─── Public registration ──────────────────────────────────────────────────────
 
@@ -137,7 +133,7 @@ export async function setupSingleAccount(index: number): Promise<Account | null>
 
 // ─── Full wizard ──────────────────────────────────────────────────────────────
 
-async function runSetupWizard({ addMode }: { addMode: boolean }): Promise<void> {
+export async function runSetupWizard({ addMode }: { addMode: boolean }): Promise<void> {
   const platform = detectPlatform();
   const hasExisting = accountsFileExists();
   const existingClient = readConfig().client;
@@ -355,199 +351,17 @@ async function runPostSetupFlow(accountCount: number): Promise<void> {
     console.log(chalk.gray(`      ANTHROPIC_AUTH_TOKEN = proxy-managed`));
   }
 
-  // ── Auto-update preference ──────────────────────────────────────────────
-  const existingCfg = readConfig();
-  if (existingCfg.autoUpdate === undefined) {
-    const enableAutoUpdate = await confirm({
-      message: "Enable auto-updates? (proxy will install patch/minor releases automatically)",
-      default: true,
-    });
-    writeConfig({ ...existingCfg, autoUpdate: enableAutoUpdate });
-    console.log(chalk.gray(`  Auto-update: ${enableAutoUpdate ? chalk.green("enabled") : chalk.gray("disabled")}`));
-    console.log(chalk.gray("  Change later with: cc-router configure --enable-auto-update / --disable-auto-update"));
-  }
-
-  // 2. Only ask about starting the proxy if it's local
-  console.log(chalk.bold(`\n${"━".repeat(40)}\n  Start the proxy\n${"━".repeat(40)}\n`));
-
-  // Check if it's already running
-  const alreadyRunning = await isProxyRunning();
-  if (alreadyRunning) {
-    console.log(chalk.green(`  ✓ Proxy is already running on http://localhost:${PROXY_PORT}`));
-    printDone(accountCount);
-    return;
-  }
-
-  const startChoice = await select({
-    message: "How do you want to run the proxy?",
-    choices: [
-      { name: "Install as system service  (auto-start on boot — recommended)", value: "service" },
-      { name: "Start in background now  (current session only, via PM2)", value: "daemon" },
-      { name: "Start in foreground now  (this terminal, Ctrl+C to stop)", value: "foreground" },
-      { name: "I'll start it manually later", value: "skip" },
-    ],
-  });
-
-  if (startChoice === "service") {
-    await installService();
-  } else if (startChoice === "daemon") {
-    await startDaemon();
-  } else if (startChoice === "foreground") {
-    printDone(accountCount);
-    console.log(chalk.cyan("\nStarting proxy in foreground...\n"));
-    // Launch start as child — it blocks until Ctrl+C
-    await startForeground();
-    return; // startForeground never returns normally
-  }
-
   printDone(accountCount);
 }
 
-// ─── Proxy launch helpers ─────────────────────────────────────────────────────
-
-async function isProxyRunning(): Promise<boolean> {
-  try {
-    const res = await fetch(`http://localhost:${PROXY_PORT}/cc-router/health`, {
-      signal: AbortSignal.timeout(800),
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function installService(): Promise<void> {
-  console.log(chalk.cyan("\n  Installing as system service via PM2..."));
-  try {
-    // Ensure PM2 is installed
-    await execFileAsync("pm2", ["--version"]).catch(async () => {
-      console.log(chalk.gray("  Installing PM2..."));
-      await execFileAsync("npm", ["install", "-g", "pm2"]);
-    });
-
-    const { fileURLToPath } = await import("url");
-    const { dirname, join } = await import("path");
-    const __dirname = dirname(fileURLToPath(import.meta.url));
-    const cliEntry = join(__dirname, "index.js");
-
-    // Start in PM2
-    await execFileAsync("pm2", [
-      "start", cliEntry,
-      "--name", "cc-router",
-      "--interpreter", process.execPath,
-      "--max-memory-restart", "500M",
-      "--", "start",
-    ]).catch(async (err) => {
-      // Already registered — restart instead
-      if ((err as Error).message?.includes("already")) {
-        await execFileAsync("pm2", ["restart", "cc-router"]);
-      } else {
-        throw err;
-      }
-    });
-
-    await execFileAsync("pm2", ["save"]);
-    console.log(chalk.green("  ✓ cc-router registered in PM2 and saved"));
-
-    // Generate startup hook
-    try {
-      const { stdout, stderr } = await execFileAsync("pm2", ["startup"]);
-      const combined = stdout + stderr;
-      const sudoMatch = combined.match(/sudo\s+\S.+/);
-      if (sudoMatch) {
-        console.log(chalk.yellow("\n  Run this command to complete auto-start setup:"));
-        console.log(chalk.white(`    ${sudoMatch[0]}`));
-        console.log(chalk.gray("  Then run: pm2 save"));
-      } else {
-        console.log(chalk.green("  ✓ Auto-start on boot configured"));
-      }
-    } catch (err) {
-      const combined = ((err as Error & { stdout?: string; stderr?: string }).stdout ?? "") +
-                       ((err as Error & { stdout?: string; stderr?: string }).stderr ?? "");
-      const sudoMatch = combined.match(/sudo\s+\S.+/);
-      if (sudoMatch) {
-        console.log(chalk.yellow("\n  Run this command to complete auto-start setup:"));
-        console.log(chalk.white(`    ${sudoMatch[0]}`));
-        console.log(chalk.gray("  Then run: pm2 save"));
-      }
-    }
-
-    // Wait a moment and confirm it started
-    await new Promise(r => setTimeout(r, 1500));
-    const running = await isProxyRunning();
-    if (running) {
-      console.log(chalk.green(`  ✓ Proxy is running on http://localhost:${PROXY_PORT}`));
-    } else {
-      console.log(chalk.yellow("  ⚠ Service registered but proxy not yet responding — it may still be starting."));
-      console.log(chalk.gray("    Check: cc-router service status"));
-    }
-  } catch (err) {
-    console.log(chalk.red(`  ✗ Service install failed: ${(err as Error).message}`));
-    console.log(chalk.gray("  Try manually: cc-router service install"));
-  }
-}
-
-async function startDaemon(): Promise<void> {
-  console.log(chalk.cyan("\n  Starting in background via PM2..."));
-  try {
-    const { fileURLToPath } = await import("url");
-    const { dirname, join } = await import("path");
-    const __dirname = dirname(fileURLToPath(import.meta.url));
-    const cliEntry = join(__dirname, "index.js");
-
-    await execFileAsync("pm2", [
-      "start", cliEntry,
-      "--name", "cc-router",
-      "--interpreter", process.execPath,
-      "--max-memory-restart", "500M",
-      "--", "start",
-    ]).catch(async (err) => {
-      if ((err as Error).message?.includes("already")) {
-        await execFileAsync("pm2", ["restart", "cc-router"]);
-      } else {
-        throw err;
-      }
-    });
-
-    await new Promise(r => setTimeout(r, 1500));
-    const running = await isProxyRunning();
-    if (running) {
-      console.log(chalk.green(`  ✓ Proxy running in background on http://localhost:${PROXY_PORT}`));
-      console.log(chalk.gray("    Logs: pm2 logs cc-router  |  Stop: cc-router stop"));
-    } else {
-      console.log(chalk.yellow("  ⚠ PM2 registered but proxy not yet responding."));
-      console.log(chalk.gray("    Check: pm2 logs cc-router"));
-    }
-  } catch (err) {
-    console.log(chalk.red(`  ✗ Failed to start via PM2: ${(err as Error).message}`));
-    console.log(chalk.gray("  PM2 not installed? Run: npm install -g pm2"));
-    console.log(chalk.gray("  Or start manually: cc-router start"));
-  }
-}
-
-async function startForeground(): Promise<void> {
-  const { fileURLToPath } = await import("url");
-  const { dirname, join } = await import("path");
-  const __dirname = dirname(fileURLToPath(import.meta.url));
-  const cliEntry = join(__dirname, "index.js");
-
-  const child = spawn(process.execPath, [cliEntry, "start"], { stdio: "inherit" });
-  await new Promise<void>((resolve) => {
-    child.on("close", resolve);
-    child.on("error", (err) => {
-      console.error(chalk.red(`  ✗ ${err.message}`));
-      resolve();
-    });
-  });
-}
 
 // ─── Done banner ──────────────────────────────────────────────────────────────
 
 function printDone(accountCount: number): void {
   console.log(chalk.bold(`\n${"━".repeat(40)}\n  All done — ${accountCount} account(s) ready\n${"━".repeat(40)}\n`));
-  console.log(`  Dashboard:         ${chalk.cyan("cc-router status")}`);
+  console.log(`  Start the proxy:   ${chalk.cyan("cc-router start")}`);
   console.log(`  Add more accounts: ${chalk.cyan("cc-router setup --add")}`);
-  console.log(`  Stop & revert:     ${chalk.cyan("cc-router revert")}\n`);
+  console.log(`  Dashboard:         ${chalk.cyan("cc-router status")}\n`);
 }
 
 // ─── Manual token input ───────────────────────────────────────────────────────
