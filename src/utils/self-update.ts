@@ -4,6 +4,7 @@ import { join, resolve } from "path";
 import { createRequire } from "module";
 import chalk from "chalk";
 import { CONFIG_DIR } from "../config/paths.js";
+import { removePid } from "../daemon/pid.js";
 
 const PKG_NAME = "ai-cc-router";
 const REGISTRY_URL = `https://registry.npmjs.org/${PKG_NAME}/latest`;
@@ -149,15 +150,32 @@ export async function performUpdate(targetVersion: string): Promise<boolean> {
 
 // ─── Restart ─────────────────────────────────────────────────────────────────
 
-function isRunningUnderPm2(): boolean {
-  return !!process.env["PM2_HOME"] || !!process.env["pm_id"];
+/** Detect if running under an OS-level service manager or PM2. */
+function isRunningAsService(): boolean {
+  // Custom env var set by our own service definitions (launchd/systemd)
+  if (process.env["CC_ROUTER_SERVICE"] === "1") return true;
+  // PM2 (legacy — users who haven't migrated yet)
+  if (process.env["PM2_HOME"] || process.env["pm_id"]) return true;
+  return false;
 }
 
-/** Restart the process. Under PM2 → SIGTERM (let PM2 restart). Standalone → detached respawn. */
+/**
+ * Restart the process.
+ * - Under a service manager (launchd/systemd/PM2) → exit and let the manager restart us.
+ * - Standalone daemon → spawn a replacement, then exit.
+ * - Foreground → spawn a replacement, then exit.
+ */
 export function restartSelf(): void {
-  if (isRunningUnderPm2()) {
-    console.log(chalk.gray("Restarting via PM2..."));
-    process.kill(process.pid, "SIGTERM");
+  if (isRunningAsService()) {
+    console.log(chalk.gray("Restarting via service manager..."));
+    // Clean up PID file before exit
+    removePid();
+    // Exit with non-zero so KeepAlive/Restart=on-failure triggers a restart.
+    // Note: exit(1) is intentional — launchd's SuccessfulExit=false and
+    // systemd's Restart=on-failure both require a non-zero exit to restart.
+    // A cleaner approach (custom exit code or env-based signal) would avoid
+    // polluting logs with "FAILURE" entries, but requires service file changes.
+    process.exit(1);
     return;
   }
 
