@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { TokenPool } from "../proxy/token-pool.js";
 import type { Account } from "../proxy/types.js";
+import { DEFAULT_RATE_LIMITS } from "../proxy/types.js";
 
 function makeAccount(id: string, healthy = true, busy = false): Account {
   return {
@@ -18,6 +19,7 @@ function makeAccount(id: string, healthy = true, busy = false): Account {
     lastUsed: 0,
     lastRefresh: 0,
     consecutiveErrors: 0,
+    rateLimits: { ...DEFAULT_RATE_LIMITS },
   };
 }
 
@@ -80,11 +82,12 @@ describe("TokenPool — busy accounts", () => {
     expect(pool.getNext().id).toBe("b");
   });
 
-  it("returns least-loaded when ALL healthy accounts are busy", () => {
+  it("returns account with earliest reset when ALL healthy accounts are busy", () => {
     const a = makeAccount("a", true, true);
     const b = makeAccount("b", true, true);
-    a.requestCount = 10;
-    b.requestCount = 3;
+    // "b" resets sooner → should be selected
+    a.rateLimits = { ...DEFAULT_RATE_LIMITS, fiveHourReset: 9999999999 };
+    b.rateLimits = { ...DEFAULT_RATE_LIMITS, fiveHourReset: 1000000000 };
     const pool = new TokenPool([a, b]);
     expect(pool.getNext().id).toBe("b");
   });
