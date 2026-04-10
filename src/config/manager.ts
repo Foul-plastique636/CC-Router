@@ -70,6 +70,8 @@ export interface RunPreferences {
   serverMode: boolean;
   /** Port to listen on (default 3456) */
   port: number;
+  /** Automatically configure Claude Code (~/.claude/settings.json) to use the proxy on start */
+  configureClaudeCode?: boolean;
 }
 
 export interface ProxyConfig {

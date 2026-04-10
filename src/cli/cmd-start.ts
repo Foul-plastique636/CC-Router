@@ -148,10 +148,20 @@ async function askRunPreferences(): Promise<RunPreferences> {
     default: false,
   });
 
+  // For local (non-server) mode, ask about auto-configuring Claude Code
+  let configureClaudeCode = true;
+  if (!serverMode) {
+    configureClaudeCode = await confirm({
+      message: "Configure Claude Code to use the proxy automatically? (recommended)",
+      default: true,
+    });
+  }
+
   const prefs: RunPreferences = {
     mode: autoStart ? "service" : mode,
     serverMode,
     port: PROXY_PORT,
+    configureClaudeCode,
   };
 
   console.log(chalk.green(`\n  ✓ Preferences saved. Next time 'cc-router start' will use these automatically.`));
@@ -194,13 +204,15 @@ async function ensureClaudeCodeConfigured(
   prefs: RunPreferences,
   cfg: ReturnType<typeof readConfig>,
 ): Promise<void> {
+  // Skip if user opted out (server mode always skips — clients configure themselves)
+  if (prefs.configureClaudeCode === false || prefs.serverMode) return;
+
   try {
     const { readClaudeProxySettings } = await import("../utils/claude-config.js");
     const current = readClaudeProxySettings();
     if (current.baseUrl) return; // already configured
 
-    const host = prefs.serverMode ? "0.0.0.0" : "localhost";
-    writeClaudeSettings(prefs.port, `http://${host === "0.0.0.0" ? "localhost" : host}:${prefs.port}`);
+    writeClaudeSettings(prefs.port, `http://localhost:${prefs.port}`);
     console.log(chalk.green("  ✓ Claude Code configured to use the proxy"));
   } catch (err) {
     console.warn(chalk.yellow(`  ⚠ Could not configure Claude Code: ${(err as Error).message}`));
