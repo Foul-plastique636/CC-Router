@@ -15,6 +15,7 @@ import { logRoute, logError, logStartup } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL } from "../config/paths.js";
+import { writePid, removePid } from "../daemon/pid.js";
 import type { Account, AccountRateLimits } from "./types.js";
 import chalk from "chalk";
 
@@ -408,6 +409,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const shutdown = () => {
     console.log(chalk.yellow("\nShutting down — saving tokens..."));
     saveAccounts(pool.getAll());
+    if (process.env["CC_ROUTER_DAEMON"] === "1") {
+      removePid();
+    }
     process.exit(0);
   };
   process.on("SIGTERM", shutdown);
@@ -444,6 +448,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // Defaults to 127.0.0.1 (localhost-only) for single-user safety.
   const host = process.env["HOST"] ?? "127.0.0.1";
   app.listen(port, host, () => {
+    // Write PID for daemon/service process management
+    if (process.env["CC_ROUTER_DAEMON"] === "1") {
+      writePid(process.pid);
+    }
+
     logStartup(port, host, mode, target, accounts.length);
     if (autoUpdate) console.log(chalk.gray("  Auto-update: enabled (patch/minor)"));
 
