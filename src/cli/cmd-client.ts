@@ -171,7 +171,7 @@ export function registerClient(program: Command): void {
       }
 
       if (wantsDesktop) {
-        await setupDesktopInterception(url);
+        await setupDesktopInterception(url, secret);
         cfg.client!.desktopEnabled = true;
         writeConfig(cfg);
       }
@@ -349,7 +349,7 @@ export function registerClient(program: Command): void {
       }
 
       if (!cfg.client.desktopEnabled) {
-        await setupDesktopInterception(cfg.client.remoteUrl);
+        await setupDesktopInterception(cfg.client.remoteUrl, cfg.client.remoteSecret);
         cfg.client.desktopEnabled = true;
         writeConfig(cfg);
       }
@@ -378,12 +378,13 @@ export function registerClient(program: Command): void {
       }
 
       const target = cfg.client.remoteUrl;
+      const secret = cfg.client.remoteSecret;
       const processName = getProcessName();
       console.log(chalk.cyan(`\nStarting mitmproxy interceptor for "${processName}"...`));
       console.log(chalk.gray(`  Redirecting api.anthropic.com/v1/messages → ${target}`));
 
       try {
-        await startInterceptor(target);
+        await startInterceptor(target, secret);
       } catch (e) {
         console.error(chalk.red(`\n✗ Failed to start interceptor:\n`));
         console.error(chalk.yellow("  " + (e as Error).message.split("\n").join("\n  ")));
@@ -400,7 +401,7 @@ export function registerClient(program: Command): void {
           default: true,
         });
         if (autoStart) {
-          const ok = await installInterceptorService(target);
+          const ok = await installInterceptorService(target, secret);
           if (ok) {
             cfg.client.desktopAutoStart = true;
             writeConfig(cfg);
@@ -490,7 +491,7 @@ export function printNetworkExtensionInstructions(): void {
   console.log(chalk.gray("  You only need to do this ONCE per machine.\n"));
 }
 
-async function setupDesktopInterception(target: string): Promise<void> {
+async function setupDesktopInterception(target: string, secret?: string): Promise<void> {
   console.log(chalk.bold("\n🖥  Claude Desktop Setup\n"));
 
   // 0. Explain what actually works before anything else
@@ -556,8 +557,8 @@ async function setupDesktopInterception(target: string): Promise<void> {
     }
   }
 
-  // 4. Write addon script
-  writeAddonScript(target);
+  // 4. Write addon script (with secret so intercepted requests authenticate)
+  writeAddonScript(target, secret);
   console.log(chalk.green("✓ Redirect addon configured"));
 
   // 5. macOS Network Extension — THIS is the step people miss

@@ -467,7 +467,7 @@ async function runClientSetupFromWizard(): Promise<void> {
       default: false,
     });
     if (wantsDesktop) {
-      await setupDesktopFromWizard(url);
+      await setupDesktopFromWizard(url, secret);
       cfg.client!.desktopEnabled = true;
       writeConfig(cfg);
     }
@@ -482,7 +482,7 @@ async function runClientSetupFromWizard(): Promise<void> {
   console.log();
 }
 
-async function setupDesktopFromWizard(target: string): Promise<void> {
+async function setupDesktopFromWizard(target: string, secret?: string): Promise<void> {
   console.log(chalk.bold("\n🖥  Claude Desktop — Cowork / Agent Setup\n"));
 
   // 1. Check mitmproxy
@@ -528,8 +528,8 @@ async function setupDesktopFromWizard(target: string): Promise<void> {
     }
   }
 
-  // 3. Addon
-  writeAddonScript(target);
+  // 3. Addon (with secret so intercepted requests authenticate against the proxy)
+  writeAddonScript(target, secret);
   console.log(chalk.green("✓ Redirect addon configured"));
 
   // 4. Network Extension walkthrough (macOS)

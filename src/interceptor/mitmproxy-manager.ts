@@ -209,12 +209,13 @@ export async function installCaCert(): Promise<boolean> {
  * Write the redirect addon to ~/.cc-router/interceptor/addon.py.
  * Uses the bundled template as source.
  */
-export function writeAddonScript(target: string): void {
+export function writeAddonScript(target: string, secret?: string): void {
   if (!existsSync(ADDON_DIR)) mkdirSync(ADDON_DIR, { recursive: true });
 
   // Try to use the bundled addon as template; fall back to a minimal inline version.
-  // In BOTH cases we inject the actual target URL so the addon is self-contained
-  // and doesn't depend on the CC_ROUTER_TARGET env var being present at runtime.
+  // In BOTH cases we inject the actual target URL (and secret) so the addon is
+  // self-contained and doesn't depend on the CC_ROUTER_TARGET / CC_ROUTER_SECRET
+  // env vars being present at runtime.
   const bundled = addonSourcePath();
   let src: string;
   if (existsSync(bundled)) {
@@ -233,6 +234,8 @@ _target_parsed = urlparse(_target)
 if not _target_parsed.scheme or not _target_parsed.netloc:
     raise RuntimeError(f"CC_ROUTER_TARGET is not a valid URL: {_target_raw!r}")
 
+_secret = os.environ.get("CC_ROUTER_SECRET", "")
+
 _REDIRECT_PREFIXES = ("/v1/messages", "/v1/models")
 
 def request(flow: http.HTTPFlow) -> None:
@@ -244,12 +247,21 @@ def request(flow: http.HTTPFlow) -> None:
     flow.request.host = _target_parsed.hostname or "localhost"
     flow.request.port = _target_parsed.port or (443 if _target_parsed.scheme == "https" else 80)
     flow.request.headers["host"] = flow.request.host + (f":{flow.request.port}" if flow.request.port not in (80, 443) else "")
+    if _secret:
+        flow.request.headers["x-api-key"] = _secret
 `.trimStart();
   }
 
-  // Inject the actual target URL into the default so the addon works even
-  // without the CC_ROUTER_TARGET env var (e.g. manual mitmdump restarts).
+  // Inject the target URL and (optionally) secret into the default values so
+  // the addon works even without the CC_ROUTER_TARGET / CC_ROUTER_SECRET env
+  // vars being present at runtime (manual mitmdump restarts, launchd, etc.).
   src = src.replace('"http://localhost:3456"', JSON.stringify(target));
+  if (secret) {
+    src = src.replace(
+      'os.environ.get("CC_ROUTER_SECRET", "")',
+      `os.environ.get("CC_ROUTER_SECRET", ${JSON.stringify(secret)})`,
+    );
+  }
   writeFileSync(ADDON_PATH, src, "utf-8");
 }
 
@@ -259,7 +271,7 @@ def request(flow: http.HTTPFlow) -> None:
  * Start mitmdump in local mode, intercepting the Claude process and redirecting
  * api.anthropic.com traffic to CC-Router via the addon script.
  */
-export async function startInterceptor(target: string): Promise<void> {
+export async function startInterceptor(target: string, secret?: string): Promise<void> {
   // On macOS, verify the Network Extension is enabled before attempting to start.
   // If it's "waiting", mitmdump starts silently but captures zero traffic.
   if (isMacos()) {
@@ -285,7 +297,7 @@ export async function startInterceptor(target: string): Promise<void> {
 
   // Always (re)write the addon script so package updates and target-URL
   // changes are picked up automatically without requiring a fresh setup.
-  writeAddonScript(target);
+  writeAddonScript(target, secret);
 
   const processName = getProcessName();
   const args = [
@@ -295,10 +307,13 @@ export async function startInterceptor(target: string): Promise<void> {
     "--quiet",
   ];
 
+  const env: NodeJS.ProcessEnv = { ...process.env, CC_ROUTER_TARGET: target };
+  if (secret) env["CC_ROUTER_SECRET"] = secret;
+
   const child = spawn("mitmdump", args, {
     detached: true,
     stdio: "ignore",
-    env: { ...process.env, CC_ROUTER_TARGET: target },
+    env,
   });
 
   child.unref();
@@ -366,8 +381,12 @@ async function resolveMitmdumpPath(): Promise<string> {
   }
 }
 
-function buildInterceptorPlist(mitmdumpPath: string, target: string): string {
+function buildInterceptorPlist(mitmdumpPath: string, target: string, secret?: string): string {
   const processName = getProcessName();
+  const secretEntry = secret
+    ? `        <key>CC_ROUTER_SECRET</key>
+        <string>${secret}</string>`
+    : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -404,14 +423,16 @@ function buildInterceptorPlist(mitmdumpPath: string, target: string): string {
         <string>${process.env["PATH"] ?? "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"}</string>
         <key>CC_ROUTER_TARGET</key>
         <string>${target}</string>
+${secretEntry}
     </dict>
 </dict>
 </plist>
 `;
 }
 
-function buildInterceptorSystemdUnit(mitmdumpPath: string, target: string): string {
+function buildInterceptorSystemdUnit(mitmdumpPath: string, target: string, secret?: string): string {
   const processName = getProcessName();
+  const secretLine = secret ? `\nEnvironment=CC_ROUTER_SECRET=${secret}` : "";
   return `[Unit]
 Description=CC-Router Interceptor — mitmproxy for Claude Desktop
 After=network-online.target
@@ -425,7 +446,7 @@ RestartSec=5
 StartLimitIntervalSec=60
 StartLimitBurst=5
 Environment=PATH=${process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin"}
-Environment=CC_ROUTER_TARGET=${target}
+Environment=CC_ROUTER_TARGET=${target}${secretLine}
 
 [Install]
 WantedBy=default.target
@@ -436,9 +457,9 @@ WantedBy=default.target
  * Install the mitmproxy interceptor as an OS service so it starts on boot.
  * Stops any existing detached mitmdump process first — the OS service takes over.
  */
-export async function installInterceptorService(target: string): Promise<boolean> {
-  // Ensure the addon script is up-to-date with the target URL
-  writeAddonScript(target);
+export async function installInterceptorService(target: string, secret?: string): Promise<boolean> {
+  // Ensure the addon script is up-to-date with the target URL and secret
+  writeAddonScript(target, secret);
 
   // Stop any manually-spawned mitmdump — OS service will manage it now
   await stopInterceptor();
@@ -447,9 +468,9 @@ export async function installInterceptorService(target: string): Promise<boolean
   const platform = detectPlatform();
 
   switch (platform) {
-    case "macos":  return installInterceptorMacOS(mitmdumpPath, target);
-    case "linux":  return installInterceptorLinux(mitmdumpPath, target);
-    case "windows": return installInterceptorWindows(mitmdumpPath, target);
+    case "macos":  return installInterceptorMacOS(mitmdumpPath, target, secret);
+    case "linux":  return installInterceptorLinux(mitmdumpPath, target, secret);
+    case "windows": return installInterceptorWindows(mitmdumpPath, target, secret);
   }
 }
 
@@ -473,7 +494,7 @@ export function isInterceptorServiceInstalled(): boolean {
 
 // ─── macOS LaunchAgent ──────────────────────────────────────────────────────
 
-async function installInterceptorMacOS(mitmdumpPath: string, target: string): Promise<boolean> {
+async function installInterceptorMacOS(mitmdumpPath: string, target: string, secret?: string): Promise<boolean> {
   const launchAgentsDir = dirname(LAUNCHD_PLIST);
   if (!existsSync(launchAgentsDir)) mkdirSync(launchAgentsDir, { recursive: true });
 
@@ -482,7 +503,7 @@ async function installInterceptorMacOS(mitmdumpPath: string, target: string): Pr
     await interceptorLaunchctlUnload();
   }
 
-  writeFileSync(LAUNCHD_PLIST, buildInterceptorPlist(mitmdumpPath, target), "utf-8");
+  writeFileSync(LAUNCHD_PLIST, buildInterceptorPlist(mitmdumpPath, target, secret), "utf-8");
 
   // Load — try modern `bootstrap` first, fallback to legacy `load`
   const uid = String(process.getuid?.() ?? 501);
@@ -519,10 +540,10 @@ async function interceptorLaunchctlUnload(): Promise<void> {
 
 // ─── Linux systemd user service ─────────────────────────────────────────────
 
-async function installInterceptorLinux(mitmdumpPath: string, target: string): Promise<boolean> {
+async function installInterceptorLinux(mitmdumpPath: string, target: string, secret?: string): Promise<boolean> {
   if (!existsSync(SYSTEMD_DIR)) mkdirSync(SYSTEMD_DIR, { recursive: true });
 
-  writeFileSync(SYSTEMD_SERVICE, buildInterceptorSystemdUnit(mitmdumpPath, target), "utf-8");
+  writeFileSync(SYSTEMD_SERVICE, buildInterceptorSystemdUnit(mitmdumpPath, target, secret), "utf-8");
 
   try {
     await execFileP("systemctl", ["--user", "daemon-reload"]);
@@ -548,9 +569,10 @@ async function uninstallInterceptorLinux(): Promise<void> {
 
 // ─── Windows Registry ───────────────────────────────────────────────────────
 
-async function installInterceptorWindows(mitmdumpPath: string, target: string): Promise<boolean> {
+async function installInterceptorWindows(mitmdumpPath: string, target: string, secret?: string): Promise<boolean> {
   const processName = getProcessName();
-  const cmd = `cmd /c "set CC_ROUTER_TARGET=${target} && "${mitmdumpPath}" --mode local:${processName} -s "${ADDON_PATH}" --set connection_strategy=lazy --quiet"`;
+  const secretEnv = secret ? `set CC_ROUTER_SECRET=${secret} && ` : "";
+  const cmd = `cmd /c "set CC_ROUTER_TARGET=${target} && ${secretEnv}"${mitmdumpPath}" --mode local:${processName} -s "${ADDON_PATH}" --set connection_strategy=lazy --quiet"`;
 
   try {
     await execFileP("reg", [

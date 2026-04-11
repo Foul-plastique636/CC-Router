@@ -24,6 +24,9 @@ _target_parsed = urlparse(_target)
 if not _target_parsed.scheme or not _target_parsed.netloc:
     raise RuntimeError(f"CC_ROUTER_TARGET is not a valid URL: {_target_raw!r}")
 
+# Optional proxy secret — when set, injected as x-api-key on redirected requests
+_secret = os.environ.get("CC_ROUTER_SECRET", "")
+
 # Paths that CC-Router can handle (it injects its own OAuth token)
 _REDIRECT_PREFIXES = (
     "/v1/messages",
@@ -47,3 +50,7 @@ def request(flow: http.HTTPFlow) -> None:
         if flow.request.port not in (80, 443)
         else ""
     )
+
+    # Authenticate against the proxy if a secret is configured
+    if _secret:
+        flow.request.headers["x-api-key"] = _secret
