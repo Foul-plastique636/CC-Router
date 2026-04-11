@@ -11,12 +11,12 @@
  *   Linux  → eBPF (requires kernel ≥ 6.8)
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
-import { join } from "path";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from "fs";
+import { dirname, join } from "path";
 import os from "os";
-import { execFile, spawn } from "child_process";
+import { execFile, execFileSync, spawn } from "child_process";
 import { promisify } from "util";
-import { isMacos, isWindows } from "../utils/platform.js";
+import { isMacos, isWindows, detectPlatform } from "../utils/platform.js";
 import { CONFIG_DIR } from "../config/paths.js";
 
 const execFileP = promisify(execFile);
@@ -26,7 +26,17 @@ const execFileP = promisify(execFile);
 const ADDON_DIR = join(CONFIG_DIR, "interceptor");
 const ADDON_PATH = join(ADDON_DIR, "addon.py");
 const PID_PATH = join(ADDON_DIR, "mitmdump.pid");
+const LOG_PATH = join(ADDON_DIR, "mitmdump.log");
 const CA_PATH = join(os.homedir(), ".mitmproxy", "mitmproxy-ca-cert.pem");
+
+// ─── Service paths ────────────────────────────────────────────────────────────
+
+const LAUNCHD_LABEL = "com.cc-router.interceptor";
+const LAUNCHD_PLIST = join(os.homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+const SYSTEMD_DIR = join(os.homedir(), ".config", "systemd", "user");
+const SYSTEMD_SERVICE = join(SYSTEMD_DIR, "cc-router-interceptor.service");
+const WINDOWS_REG_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const WINDOWS_REG_NAME = "CC-Router-Interceptor";
 
 // Bundled addon template lives next to this module in src/interceptor/addon.py;
 // at runtime (dist/) it's NOT guaranteed to exist because the .py file is only
@@ -202,20 +212,27 @@ export async function installCaCert(): Promise<boolean> {
 export function writeAddonScript(target: string): void {
   if (!existsSync(ADDON_DIR)) mkdirSync(ADDON_DIR, { recursive: true });
 
-  // Try to copy from the bundled addon; if not found, generate inline
+  // Try to use the bundled addon as template; fall back to a minimal inline version.
+  // In BOTH cases we inject the actual target URL so the addon is self-contained
+  // and doesn't depend on the CC_ROUTER_TARGET env var being present at runtime.
   const bundled = addonSourcePath();
+  let src: string;
   if (existsSync(bundled)) {
-    const src = readFileSync(bundled, "utf-8");
-    writeFileSync(ADDON_PATH, src, "utf-8");
+    src = readFileSync(bundled, "utf-8");
   } else {
     // Inline fallback — minimal addon (only redirects /v1/messages and /v1/models)
-    const script = `
+    src = `
 import os
 from mitmproxy import http
 from urllib.parse import urlparse
 
-_target = os.environ.get("CC_ROUTER_TARGET", ${JSON.stringify(target)}).rstrip("/")
-_p = urlparse(_target)
+_target_raw = os.environ.get("CC_ROUTER_TARGET", "http://localhost:3456")
+_target = _target_raw.rstrip("/")
+_target_parsed = urlparse(_target)
+
+if not _target_parsed.scheme or not _target_parsed.netloc:
+    raise RuntimeError(f"CC_ROUTER_TARGET is not a valid URL: {_target_raw!r}")
+
 _REDIRECT_PREFIXES = ("/v1/messages", "/v1/models")
 
 def request(flow: http.HTTPFlow) -> None:
@@ -223,13 +240,17 @@ def request(flow: http.HTTPFlow) -> None:
         return
     if not flow.request.path.startswith(_REDIRECT_PREFIXES):
         return
-    flow.request.scheme = _p.scheme
-    flow.request.host = _p.hostname or "localhost"
-    flow.request.port = _p.port or (443 if _p.scheme == "https" else 80)
+    flow.request.scheme = _target_parsed.scheme
+    flow.request.host = _target_parsed.hostname or "localhost"
+    flow.request.port = _target_parsed.port or (443 if _target_parsed.scheme == "https" else 80)
     flow.request.headers["host"] = flow.request.host + (f":{flow.request.port}" if flow.request.port not in (80, 443) else "")
 `.trimStart();
-    writeFileSync(ADDON_PATH, script, "utf-8");
   }
+
+  // Inject the actual target URL into the default so the addon works even
+  // without the CC_ROUTER_TARGET env var (e.g. manual mitmdump restarts).
+  src = src.replace('"http://localhost:3456"', JSON.stringify(target));
+  writeFileSync(ADDON_PATH, src, "utf-8");
 }
 
 // ─── Interceptor lifecycle ────────────────────────────────────────────────────
@@ -329,4 +350,237 @@ function readPid(): number | null {
   const raw = readFileSync(PID_PATH, "utf-8").trim();
   const pid = parseInt(raw, 10);
   return Number.isNaN(pid) ? null : pid;
+}
+
+// ─── Interceptor OS service (auto-start on boot) ────────────────────────────
+
+/** Resolve the absolute path to mitmdump so launchd/systemd can find it. */
+async function resolveMitmdumpPath(): Promise<string> {
+  try {
+    const cmd = isWindows() ? "where" : "which";
+    const { stdout } = await execFileP(cmd, ["mitmdump"]);
+    return stdout.trim().split("\n")[0]!;
+  } catch {
+    return "mitmdump"; // fallback — hope it's on PATH at boot time
+  }
+}
+
+function buildInterceptorPlist(mitmdumpPath: string, target: string): string {
+  const processName = getProcessName();
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${mitmdumpPath}</string>
+        <string>--mode</string>
+        <string>local:${processName}</string>
+        <string>-s</string>
+        <string>${ADDON_PATH}</string>
+        <string>--set</string>
+        <string>connection_strategy=lazy</string>
+        <string>--quiet</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>${LOG_PATH}</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_PATH}</string>
+    <key>WorkingDirectory</key>
+    <string>${os.homedir()}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>${process.env["PATH"] ?? "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"}</string>
+        <key>CC_ROUTER_TARGET</key>
+        <string>${target}</string>
+    </dict>
+</dict>
+</plist>
+`;
+}
+
+function buildInterceptorSystemdUnit(mitmdumpPath: string, target: string): string {
+  const processName = getProcessName();
+  return `[Unit]
+Description=CC-Router Interceptor — mitmproxy for Claude Desktop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${mitmdumpPath} --mode local:${processName} -s ${ADDON_PATH} --set connection_strategy=lazy --quiet
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+Environment=PATH=${process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin"}
+Environment=CC_ROUTER_TARGET=${target}
+
+[Install]
+WantedBy=default.target
+`;
+}
+
+/**
+ * Install the mitmproxy interceptor as an OS service so it starts on boot.
+ * Stops any existing detached mitmdump process first — the OS service takes over.
+ */
+export async function installInterceptorService(target: string): Promise<boolean> {
+  // Ensure the addon script is up-to-date with the target URL
+  writeAddonScript(target);
+
+  // Stop any manually-spawned mitmdump — OS service will manage it now
+  await stopInterceptor();
+
+  const mitmdumpPath = await resolveMitmdumpPath();
+  const platform = detectPlatform();
+
+  switch (platform) {
+    case "macos":  return installInterceptorMacOS(mitmdumpPath, target);
+    case "linux":  return installInterceptorLinux(mitmdumpPath, target);
+    case "windows": return installInterceptorWindows(mitmdumpPath, target);
+  }
+}
+
+export async function uninstallInterceptorService(): Promise<void> {
+  const platform = detectPlatform();
+  switch (platform) {
+    case "macos":  return uninstallInterceptorMacOS();
+    case "linux":  return uninstallInterceptorLinux();
+    case "windows": return uninstallInterceptorWindows();
+  }
+}
+
+export function isInterceptorServiceInstalled(): boolean {
+  const platform = detectPlatform();
+  switch (platform) {
+    case "macos":  return existsSync(LAUNCHD_PLIST);
+    case "linux":  return existsSync(SYSTEMD_SERVICE);
+    case "windows": return isInterceptorWindowsServiceInstalled();
+  }
+}
+
+// ─── macOS LaunchAgent ──────────────────────────────────────────────────────
+
+async function installInterceptorMacOS(mitmdumpPath: string, target: string): Promise<boolean> {
+  const launchAgentsDir = dirname(LAUNCHD_PLIST);
+  if (!existsSync(launchAgentsDir)) mkdirSync(launchAgentsDir, { recursive: true });
+
+  // Unload existing if present
+  if (existsSync(LAUNCHD_PLIST)) {
+    await interceptorLaunchctlUnload();
+  }
+
+  writeFileSync(LAUNCHD_PLIST, buildInterceptorPlist(mitmdumpPath, target), "utf-8");
+
+  // Load — try modern `bootstrap` first, fallback to legacy `load`
+  const uid = String(process.getuid?.() ?? 501);
+  try {
+    await execFileP("launchctl", ["bootstrap", `gui/${uid}`, LAUNCHD_PLIST]);
+  } catch {
+    try {
+      await execFileP("launchctl", ["load", LAUNCHD_PLIST]);
+    } catch (err) {
+      console.log(`⚠ Could not auto-load the interceptor LaunchAgent: ${(err as Error).message}`);
+      console.log(`  Load manually: launchctl load ${LAUNCHD_PLIST}`);
+      return false;
+    }
+  }
+  return true;
+}
+
+async function uninstallInterceptorMacOS(): Promise<void> {
+  if (!existsSync(LAUNCHD_PLIST)) return;
+  await interceptorLaunchctlUnload();
+  try { unlinkSync(LAUNCHD_PLIST); } catch { /* ok */ }
+}
+
+async function interceptorLaunchctlUnload(): Promise<void> {
+  const uid = String(process.getuid?.() ?? 501);
+  try {
+    await execFileP("launchctl", ["bootout", `gui/${uid}/${LAUNCHD_LABEL}`]);
+  } catch {
+    try {
+      await execFileP("launchctl", ["unload", LAUNCHD_PLIST]);
+    } catch { /* already unloaded */ }
+  }
+}
+
+// ─── Linux systemd user service ─────────────────────────────────────────────
+
+async function installInterceptorLinux(mitmdumpPath: string, target: string): Promise<boolean> {
+  if (!existsSync(SYSTEMD_DIR)) mkdirSync(SYSTEMD_DIR, { recursive: true });
+
+  writeFileSync(SYSTEMD_SERVICE, buildInterceptorSystemdUnit(mitmdumpPath, target), "utf-8");
+
+  try {
+    await execFileP("systemctl", ["--user", "daemon-reload"]);
+    await execFileP("systemctl", ["--user", "enable", "cc-router-interceptor"]);
+    await execFileP("systemctl", ["--user", "start", "cc-router-interceptor"]);
+    return true;
+  } catch (err) {
+    console.log(`⚠ systemd setup issue: ${(err as Error).message}`);
+    console.log("  Enable manually: systemctl --user enable --now cc-router-interceptor");
+    return false;
+  }
+}
+
+async function uninstallInterceptorLinux(): Promise<void> {
+  if (!existsSync(SYSTEMD_SERVICE)) return;
+  try {
+    await execFileP("systemctl", ["--user", "stop", "cc-router-interceptor"]);
+    await execFileP("systemctl", ["--user", "disable", "cc-router-interceptor"]);
+  } catch { /* may already be stopped */ }
+  try { unlinkSync(SYSTEMD_SERVICE); } catch { /* ok */ }
+  try { await execFileP("systemctl", ["--user", "daemon-reload"]); } catch { /* ok */ }
+}
+
+// ─── Windows Registry ───────────────────────────────────────────────────────
+
+async function installInterceptorWindows(mitmdumpPath: string, target: string): Promise<boolean> {
+  const processName = getProcessName();
+  const cmd = `cmd /c "set CC_ROUTER_TARGET=${target} && "${mitmdumpPath}" --mode local:${processName} -s "${ADDON_PATH}" --set connection_strategy=lazy --quiet"`;
+
+  try {
+    await execFileP("reg", [
+      "add", WINDOWS_REG_KEY,
+      "/v", WINDOWS_REG_NAME,
+      "/t", "REG_SZ",
+      "/d", cmd,
+      "/f",
+    ]);
+    return true;
+  } catch (err) {
+    console.log(`⚠ Registry write failed: ${(err as Error).message}`);
+    return false;
+  }
+}
+
+async function uninstallInterceptorWindows(): Promise<void> {
+  try {
+    await execFileP("reg", [
+      "delete", WINDOWS_REG_KEY,
+      "/v", WINDOWS_REG_NAME,
+      "/f",
+    ]);
+  } catch { /* not installed */ }
+}
+
+function isInterceptorWindowsServiceInstalled(): boolean {
+  try {
+    execFileSync("reg", ["query", WINDOWS_REG_KEY, "/v", WINDOWS_REG_NAME]);
+    return true;
+  } catch {
+    return false;
+  }
 }

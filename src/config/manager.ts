@@ -60,6 +60,8 @@ export interface ClientConfig {
   remoteSecret?: string;
   /** True once `cc-router client connect --desktop` has successfully provisioned mitmproxy */
   desktopEnabled?: boolean;
+  /** True when the mitmproxy interceptor is installed as an OS service (auto-starts on boot) */
+  desktopAutoStart?: boolean;
 }
 
 /** Persisted run preferences — asked once on first `cc-router start`, reused afterwards. */

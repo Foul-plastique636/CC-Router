@@ -17,6 +17,9 @@ import {
   getProcessName,
   getNetworkExtensionStatus,
   openNetworkExtensionSettings,
+  installInterceptorService,
+  uninstallInterceptorService,
+  isInterceptorServiceInstalled,
 } from "../interceptor/mitmproxy-manager.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -190,6 +193,10 @@ export function registerClient(program: Command): void {
       const cfg = readConfig();
 
       if (cfg.client?.desktopEnabled) {
+        if (isInterceptorServiceInstalled()) {
+          console.log(chalk.yellow("Removing Claude Desktop interceptor service..."));
+          await uninstallInterceptorService();
+        }
         console.log(chalk.yellow("Stopping Claude Desktop interceptor..."));
         await stopInterceptor();
       }
@@ -290,11 +297,17 @@ export function registerClient(program: Command): void {
       console.log(chalk.bold("\n  DESKTOP INTERCEPTOR  (Cowork / Agent mode)"));
       if (cfg.client.desktopEnabled) {
         const running = await isInterceptorRunning();
+        const serviceInstalled = isInterceptorServiceInstalled();
         if (running) {
           console.log(`    ${chalk.green("● running")}`);
         } else {
           console.log(`    ${chalk.yellow("○ configured but stopped")}`);
           console.log(chalk.gray("    Start with: cc-router client start-desktop"));
+        }
+        if (serviceInstalled) {
+          console.log(`    ${chalk.green("✓")} ${chalk.gray("Auto-start on boot: enabled")}`);
+        } else {
+          console.log(`    ${chalk.gray("○ Auto-start on boot: disabled")}`);
         }
         // Check Network Extension on macOS
         if (isMacos()) {
@@ -379,6 +392,27 @@ export function registerClient(program: Command): void {
       }
 
       console.log(chalk.green("\n✓ Claude Desktop interceptor running"));
+
+      // ── Auto-start on boot ─────────────────────────────────────────────
+      if (!cfg.client.desktopAutoStart && !isInterceptorServiceInstalled()) {
+        const autoStart = await confirm({
+          message: "Start interceptor automatically when your computer boots? (recommended)",
+          default: true,
+        });
+        if (autoStart) {
+          const ok = await installInterceptorService(target);
+          if (ok) {
+            cfg.client.desktopAutoStart = true;
+            writeConfig(cfg);
+            console.log(chalk.green("✓ Auto-start on boot configured"));
+          } else {
+            console.log(chalk.yellow("⚠ Could not configure auto-start. You can retry later."));
+          }
+        }
+      } else if (cfg.client.desktopAutoStart) {
+        console.log(chalk.gray("  Auto-start on boot: enabled"));
+      }
+
       console.log();
       console.log(chalk.bold.yellow("  Next steps:"));
       console.log("    " + chalk.cyan("1.") + " Quit Claude Desktop completely (⌘Q)");
@@ -394,7 +428,17 @@ export function registerClient(program: Command): void {
   client
     .command("stop-desktop")
     .description("Stop the Claude Desktop mitmproxy interceptor")
-    .action(async () => {
+    .option("--keep-autostart", "Stop the interceptor but keep auto-start on boot")
+    .action(async (opts: { keepAutostart?: boolean }) => {
+      if (isInterceptorServiceInstalled() && !opts.keepAutostart) {
+        await uninstallInterceptorService();
+        console.log(chalk.green("✓ Auto-start on boot removed"));
+        const cfg = readConfig();
+        if (cfg.client) {
+          cfg.client.desktopAutoStart = false;
+          writeConfig(cfg);
+        }
+      }
       await stopInterceptor();
       console.log(chalk.green("\n✓ Claude Desktop interceptor stopped\n"));
     });
