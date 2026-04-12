@@ -91,9 +91,17 @@ async function jsonOutput(port: number): Promise<void> {
  * Launches the Ink dashboard and handles "re-launch" intents.
  *
  * The dashboard cannot run inquirer prompts while Ink owns stdin, so when
- * the user presses `n` to add an account, Ink unmounts and this loop runs
- * the OAuth flow synchronously. Once tokens are obtained and POSTed to the
+ * the user presses `n` to add an account, Ink unmounts **completely** first.
+ * Only after `waitUntilExit()` resolves — and stdin is restored from raw mode
+ * — does the OAuth flow run. Once tokens are obtained and POSTed to the
  * server, the dashboard is re-rendered and polling resumes.
+ *
+ * IMPORTANT: The previous design resolved the outer promise from inside
+ * `onIntent` (before Ink unmounted), then raced with `waitUntilExit`. That
+ * caused inquirer to see a half-released stdin and force-close itself.
+ * The fix: `onIntent` writes to a mutable variable; `waitUntilExit()`
+ * is the ONLY thing that resolves the await; stdin is explicitly restored
+ * before inquirer runs.
  */
 async function dashboardLoop(port: number): Promise<void> {
   // Dynamic imports keep these heavy deps out of the cold-start path
@@ -106,26 +114,44 @@ async function dashboardLoop(port: number): Promise<void> {
   while (true) {
     const target = resolveStatusTarget(port);
 
-    const intent = await new Promise<"quit" | "addAccount">((resolve) => {
-      const onIntent = (i: "quit" | "addAccount") => resolve(i);
-      const instance = render(
-        createElement(Dashboard, {
-          port,
-          baseUrl: target.baseUrl,
-          authToken: target.authToken,
-          onIntent,
-        }),
-        // Let Ink handle Ctrl+C — it calls exit() which cleanly unmounts
-        { exitOnCtrlC: true },
-      );
-      // If Ink exits on its own (Ctrl+C or `q`) without firing onIntent, treat as quit.
-      instance.waitUntilExit().then(() => resolve("quit"));
-    });
+    // `pendingIntent` is set by the Dashboard component via `onIntent`;
+    // it defaults to "quit" so Ctrl+C (exitOnCtrlC) does the right thing
+    // without the Dashboard ever firing onIntent.
+    let pendingIntent: "quit" | "addAccount" = "quit";
 
-    if (intent === "quit") return;
+    const instance = render(
+      createElement(Dashboard, {
+        port,
+        baseUrl: target.baseUrl,
+        authToken: target.authToken,
+        onIntent: (i: "quit" | "addAccount") => { pendingIntent = i; },
+      }),
+      { exitOnCtrlC: true },
+    );
 
-    // Intent: addAccount — unmount and run the OAuth flow, then POST the
-    // resulting tokens to the server we're connected to (local or remote).
+    // Block until Ink has FULLY unmounted and released stdin.
+    // The Dashboard's keyboard handler calls exit() for both `q` and `n`;
+    // Ctrl+C also triggers exit via exitOnCtrlC.
+    await instance.waitUntilExit();
+
+    // Yield the event loop so any of Ink's pending stdin cleanup tasks
+    // (listeners detach, raw-mode restore) run before inquirer grabs stdin.
+    // Without this, inquirer can see a half-released stdin and throw
+    // "User force closed the prompt".
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    // Ink leaves stdin in raw mode. Restore it before running inquirer or
+    // exiting, otherwise the terminal may remain in a broken state.
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(false);
+    }
+    // Ink may have paused stdin — resume it so inquirer can read input.
+    process.stdin.resume();
+
+    if (pendingIntent === "quit") return;
+
+    // Intent: addAccount — run the OAuth flow, then POST the resulting
+    // tokens to the server we're connected to (local or remote).
     console.log();
     console.log(chalk.cyan("→ Adding a new account..."));
     console.log();

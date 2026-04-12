@@ -308,10 +308,12 @@ function LiveDashboard({
     }
 
     // ── Normal view mode ────────────────────────────────────────────────
-    if (input === "q") { onIntent ? onIntent("quit") : exit(); return; }
+    // Always call exit() so Ink fully unmounts and releases stdin.
+    // The outer dashboardLoop reads `pendingIntent` after waitUntilExit().
+    if (input === "q") { onIntent?.("quit"); exit(); return; }
     if (key.escape) {
       if (focus === "accounts") { setFocus("logs"); return; }
-      onIntent ? onIntent("quit") : exit();
+      onIntent?.("quit"); exit();
       return;
     }
 
@@ -349,7 +351,9 @@ function LiveDashboard({
       if (input === "d") { setMode("confirmDelete"); return; }
     }
 
-    // n = add account — works regardless of focus
+    // n = add account — works regardless of focus.
+    // Requires an onIntent handler because the outer loop runs the OAuth
+    // flow after Ink unmounts; if none is wired, this key is a no-op.
     if (input === "n") {
       if (onIntent) { onIntent("addAccount"); exit(); }
       return;
