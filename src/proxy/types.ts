@@ -40,6 +40,14 @@ export interface Account {
   lastRefresh: number;   // Unix timestamp in ms
   consecutiveErrors: number;
   rateLimits: AccountRateLimits;
+  /** When false, the pool skips this account entirely. Default: true. */
+  enabled: boolean;
+  /** Cap for the 5-hour window utilization (0–100). Account is skipped once
+   *  rateLimits.fiveHourUtil * 100 >= this value. Default: 100 (no cap). */
+  sessionLimitPercent: number;
+  /** Cap for the 7-day window utilization (0–100). Account is skipped once
+   *  rateLimits.sevenDayUtil * 100 >= this value. Default: 100 (no cap). */
+  weeklyLimitPercent: number;
 }
 
 export interface RefreshResponse {
@@ -57,4 +65,30 @@ export interface AccountRecord {
   refreshToken: string;
   expiresAt: number;
   scopes: string[];
+  // The following three fields are optional for backwards compatibility with
+  // accounts.json files created before the interactive management feature.
+  // Missing values are filled in by deserialize() with sensible defaults.
+  enabled?: boolean;
+  sessionLimitPercent?: number;
+  weeklyLimitPercent?: number;
+}
+
+/**
+ * Single source of truth for the default values of user-controllable
+ * account fields. Used by deserialize(), TokenPool.addAccount(),
+ * setupSingleAccount(), and the PATCH validation path.
+ */
+export const ACCOUNT_USER_DEFAULTS = {
+  enabled: true,
+  sessionLimitPercent: 100,
+  weeklyLimitPercent: 100,
+} as const;
+
+/**
+ * Coerce any unknown value into a valid percent in [0, 100].
+ * Non-numbers, NaN, and out-of-range values collapse to the fallback (100).
+ */
+export function clampPercent(n: unknown): number {
+  const v = typeof n === "number" && Number.isFinite(n) ? n : 100;
+  return Math.max(0, Math.min(100, Math.round(v)));
 }

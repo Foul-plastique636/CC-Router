@@ -5,9 +5,9 @@ import { timingSafeEqual } from "crypto";
 import type { IncomingMessage } from "http";
 import type { Socket } from "net";
 import type { Request } from "express";
-import { TokenPool } from "./token-pool.js";
+import { TokenPool, EmptyPoolError } from "./token-pool.js";
 import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } from "./token-refresher.js";
-import { loadAccounts, accountsFileExists, readAccountsFromPath, readConfig } from "../config/manager.js";
+import { loadAccounts, accountsFileExists, readAccountsFromPath, readConfig, serialize } from "../config/manager.js";
 import { checkForUpdate, performUpdate, restartSelf } from "../utils/self-update.js";
 import { trackEvent, startHeartbeat } from "../utils/telemetry.js";
 import { loadTelemetryState } from "../config/telemetry.js";
@@ -16,7 +16,7 @@ import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL } from "../config/paths.js";
 import { writePid, removePid } from "../daemon/pid.js";
-import type { Account, AccountRateLimits } from "./types.js";
+import type { Account, AccountRateLimits, AccountRecord } from "./types.js";
 import chalk from "chalk";
 
 // Augment Request to carry the selected account and pending log entry
@@ -107,6 +107,15 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   }
 
   const pool = new TokenPool(accounts);
+
+  // Log when the pool falls back to a capped account — makes the cap bypass
+  // visible in the dashboard's "RECENT ACTIVITY" instead of being silent.
+  pool.onCapBypass = (a) => {
+    const msg = `all accounts capped — routing to ${a.id} (5h: ${Math.round(a.rateLimits.fiveHourUtil * 100)}%, 7d: ${Math.round(a.rateLimits.sevenDayUtil * 100)}%)`;
+    logError(a.id, 0, msg);
+    stats.addLog({ ts: Date.now(), accountId: a.id, model: "-", type: "error", details: msg });
+  };
+
   startRefreshLoop(accounts);
 
   const app = express();
@@ -161,6 +170,187 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       recentLogs: stats.getRecentLogs(50),
     });
   });
+
+  // ─── Account management endpoints (authenticated) ─────────────────────────
+  // These are mounted BEFORE the /v1/* proxy middleware so they don't get
+  // forwarded to Anthropic. express.json() is scoped to this sub-router so
+  // the SSE streaming on /v1/* is never touched (see comment at /v1 handler).
+  const accountsRouter = express.Router();
+  accountsRouter.use(express.json({ limit: "32kb" }));
+
+  // Shape returned to clients — NEVER includes access/refresh tokens.
+  const publicAccountView = (a: Account) => ({
+    id: a.id,
+    enabled: a.enabled,
+    sessionLimitPercent: a.sessionLimitPercent,
+    weeklyLimitPercent: a.weeklyLimitPercent,
+    healthy: a.healthy,
+    busy: a.busy,
+    requestCount: a.requestCount,
+    errorCount: a.errorCount,
+    expiresInMs: a.tokens.expiresAt - Date.now(),
+    lastUsedMs: a.lastUsed,
+    lastRefreshMs: a.lastRefresh,
+    rateLimits: a.rateLimits,
+  });
+
+  accountsRouter.get("/", (_req, res) => {
+    res.json({ accounts: pool.getAll().map(publicAccountView) });
+  });
+
+  /**
+   * Persist the pool to disk, returning a structured result instead of
+   * throwing. Callers hold a rollback closure for in-memory state in case
+   * the disk write fails — so a ENOSPC / EACCES doesn't leave the server
+   * silently out of sync with accounts.json.
+   */
+  const tryPersist = (rollback: () => void): { ok: true } | { ok: false; message: string } => {
+    try {
+      saveAccounts(pool.getAll());
+      return { ok: true };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      try { rollback(); } catch { /* best effort */ }
+      logError("accounts", 0, `Failed to persist accounts.json: ${message}`);
+      return { ok: false, message };
+    }
+  };
+
+  accountsRouter.patch("/:id", (req, res) => {
+    const { id } = req.params;
+    const body = (req.body ?? {}) as {
+      enabled?: unknown;
+      sessionLimitPercent?: unknown;
+      weeklyLimitPercent?: unknown;
+    };
+
+    const patch: { enabled?: boolean; sessionLimitPercent?: number; weeklyLimitPercent?: number } = {};
+    if (body.enabled !== undefined) {
+      if (typeof body.enabled !== "boolean") {
+        res.status(400).json({ error: "enabled must be boolean" });
+        return;
+      }
+      patch.enabled = body.enabled;
+    }
+    for (const key of ["sessionLimitPercent", "weeklyLimitPercent"] as const) {
+      const v = body[key];
+      if (v === undefined) continue;
+      if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 100) {
+        res.status(400).json({ error: `${key} must be a number between 0 and 100` });
+        return;
+      }
+      patch[key] = v;
+    }
+
+    // Snapshot the previous values so we can roll back on persistence failure
+    const existing = pool.findById(id);
+    if (!existing) {
+      res.status(404).json({ error: `Account "${id}" not found` });
+      return;
+    }
+    const prev = {
+      enabled: existing.enabled,
+      sessionLimitPercent: existing.sessionLimitPercent,
+      weeklyLimitPercent: existing.weeklyLimitPercent,
+    };
+
+    const updated = pool.updateAccount(id, patch);
+    if (!updated) {
+      res.status(404).json({ error: `Account "${id}" not found` });
+      return;
+    }
+
+    const result = tryPersist(() => {
+      pool.updateAccount(id, prev);
+    });
+    if (!result.ok) {
+      res.status(500).json({ error: `Failed to persist accounts.json: ${result.message}` });
+      return;
+    }
+    res.json({ account: publicAccountView(updated) });
+  });
+
+  accountsRouter.post("/", (req, res) => {
+    const body = (req.body ?? {}) as Partial<AccountRecord>;
+    const required: (keyof AccountRecord)[] = ["id", "accessToken", "refreshToken", "expiresAt"];
+    for (const k of required) {
+      if (body[k] === undefined || body[k] === null || body[k] === "") {
+        res.status(400).json({ error: `Missing required field: ${k}` });
+        return;
+      }
+    }
+    if (typeof body.id !== "string" || typeof body.accessToken !== "string" ||
+        typeof body.refreshToken !== "string" || typeof body.expiresAt !== "number") {
+      res.status(400).json({ error: "Invalid field types on account record" });
+      return;
+    }
+    if (pool.findById(body.id)) {
+      res.status(409).json({ error: `Account "${body.id}" already exists` });
+      return;
+    }
+
+    const record: AccountRecord = {
+      id: body.id,
+      accessToken: body.accessToken,
+      refreshToken: body.refreshToken,
+      expiresAt: body.expiresAt,
+      scopes: Array.isArray(body.scopes) ? body.scopes : ["user:inference", "user:profile"],
+      enabled: body.enabled,
+      sessionLimitPercent: body.sessionLimitPercent,
+      weeklyLimitPercent: body.weeklyLimitPercent,
+    };
+
+    let added;
+    try {
+      added = pool.addAccount(record);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+      return;
+    }
+
+    const result = tryPersist(() => {
+      pool.removeAccount(record.id);
+    });
+    if (!result.ok) {
+      res.status(500).json({ error: `Failed to persist accounts.json: ${result.message}` });
+      return;
+    }
+    res.status(201).json({ account: publicAccountView(added) });
+  });
+
+  accountsRouter.delete("/:id", (req, res) => {
+    const { id } = req.params;
+    // Refuse to remove the last account — downstream /v1/* would have no
+    // token to route with and the pool would throw EmptyPoolError on the
+    // next request. Users who want an empty pool should `cc-router stop`.
+    if (pool.getAll().length <= 1) {
+      res.status(409).json({ error: "Cannot remove the last account — at least one must remain" });
+      return;
+    }
+    const existing = pool.findById(id);
+    if (!existing) {
+      res.status(404).json({ error: `Account "${id}" not found` });
+      return;
+    }
+    // Snapshot for rollback. serialize() gives us a persistable AccountRecord.
+    const snapshot = serialize([existing])[0];
+    const removed = pool.removeAccount(id);
+    if (!removed) {
+      res.status(404).json({ error: `Account "${id}" not found` });
+      return;
+    }
+
+    const result = tryPersist(() => {
+      pool.addAccount(snapshot);
+    });
+    if (!result.ok) {
+      res.status(500).json({ error: `Failed to persist accounts.json: ${result.message}` });
+      return;
+    }
+    res.json({ ok: true, id });
+  });
+
+  app.use("/cc-router/accounts", accountsRouter);
 
   // ─── Proxy middleware ──────────────────────────────────────────────────────
   // IMPORTANT: selfHandleResponse must be false (default) for SSE streaming to
@@ -362,8 +552,22 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // ─── /v1/* — select account, refresh if needed, then proxy ───────────────
   // CRITICAL: Do NOT use express.json() here — it consumes the body stream
   // and breaks SSE streaming passthrough.
-  app.use("/v1", async (req, _res, next) => {
-    const account = pool.getNext();
+  app.use("/v1", async (req, res, next) => {
+    let account: Account;
+    try {
+      account = pool.getNext();
+    } catch (err) {
+      if (err instanceof EmptyPoolError) {
+        stats.totalErrors++;
+        logError("proxy", 503, err.message);
+        res.status(503).json({
+          type: "error",
+          error: { type: "no_accounts", message: err.message },
+        });
+        return;
+      }
+      throw err;
+    }
 
     // Synchronous refresh if token expires within the buffer window
     if (needsRefresh(account)) {

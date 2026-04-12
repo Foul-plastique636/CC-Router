@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, copyFil
 import { randomBytes } from "crypto";
 import { CONFIG_DIR, ACCOUNTS_PATH, CONFIG_PATH } from "./paths.js";
 import type { Account, AccountRecord } from "../proxy/types.js";
-import { DEFAULT_RATE_LIMITS } from "../proxy/types.js";
+import { DEFAULT_RATE_LIMITS, ACCOUNT_USER_DEFAULTS, clampPercent } from "../proxy/types.js";
 
 export function ensureConfigDir(): void {
   if (!existsSync(CONFIG_DIR)) {
@@ -132,5 +132,26 @@ function deserialize(records: AccountRecord[]): Account[] {
     lastRefresh: 0,
     consecutiveErrors: 0,
     rateLimits: { ...DEFAULT_RATE_LIMITS },
+    enabled: a.enabled !== false,                         // default true
+    sessionLimitPercent: a.sessionLimitPercent !== undefined
+      ? clampPercent(a.sessionLimitPercent)
+      : ACCOUNT_USER_DEFAULTS.sessionLimitPercent,
+    weeklyLimitPercent: a.weeklyLimitPercent !== undefined
+      ? clampPercent(a.weeklyLimitPercent)
+      : ACCOUNT_USER_DEFAULTS.weeklyLimitPercent,
+  }));
+}
+
+/** Serialize runtime Account[] back to the flat on-disk AccountRecord[] shape. */
+export function serialize(accounts: Account[]): AccountRecord[] {
+  return accounts.map(a => ({
+    id: a.id,
+    accessToken: a.tokens.accessToken,
+    refreshToken: a.tokens.refreshToken,
+    expiresAt: a.tokens.expiresAt,
+    scopes: a.tokens.scopes,
+    enabled: a.enabled,
+    sessionLimitPercent: a.sessionLimitPercent,
+    weeklyLimitPercent: a.weeklyLimitPercent,
   }));
 }

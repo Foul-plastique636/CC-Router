@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { TokenPool } from "../proxy/token-pool.js";
-import type { Account } from "../proxy/types.js";
+import { TokenPool, EmptyPoolError } from "../proxy/token-pool.js";
+import type { Account, AccountRecord } from "../proxy/types.js";
 import { DEFAULT_RATE_LIMITS } from "../proxy/types.js";
 
 function makeAccount(id: string, healthy = true, busy = false): Account {
@@ -20,6 +20,9 @@ function makeAccount(id: string, healthy = true, busy = false): Account {
     lastRefresh: 0,
     consecutiveErrors: 0,
     rateLimits: { ...DEFAULT_RATE_LIMITS },
+    enabled: true,
+    sessionLimitPercent: 100,
+    weeklyLimitPercent: 100,
   };
 }
 
@@ -115,5 +118,126 @@ describe("TokenPool — stats", () => {
   it("getAll() returns all accounts including unhealthy", () => {
     const pool = new TokenPool([makeAccount("a", false), makeAccount("b")]);
     expect(pool.getAll()).toHaveLength(2);
+  });
+
+  it("getStats() includes enabled and limit fields", () => {
+    const pool = new TokenPool([makeAccount("a")]);
+    const s = pool.getStats()[0];
+    expect(s.enabled).toBe(true);
+    expect(s.sessionLimitPercent).toBe(100);
+    expect(s.weeklyLimitPercent).toBe(100);
+  });
+});
+
+describe("TokenPool — mutation API", () => {
+  it("removeAccount mutates the original array in place (no reference desync)", () => {
+    const accounts = [makeAccount("a"), makeAccount("b"), makeAccount("c")];
+    const pool = new TokenPool(accounts);
+    // The refresh loop captures `accounts` by reference — the array must
+    // be mutated in place so the loop sees the removal.
+    pool.removeAccount("b");
+    expect(accounts).toHaveLength(2);
+    expect(accounts.map(a => a.id)).toEqual(["a", "c"]);
+    expect(pool.getAll()).toBe(accounts); // same reference
+  });
+
+  it("removeAccount returns false for unknown id", () => {
+    const pool = new TokenPool([makeAccount("a")]);
+    expect(pool.removeAccount("nope")).toBe(false);
+    expect(pool.getAll()).toHaveLength(1);
+  });
+
+  it("addAccount appends to the original array", () => {
+    const accounts = [makeAccount("a")];
+    const pool = new TokenPool(accounts);
+    const record: AccountRecord = {
+      id: "b",
+      accessToken: "sk-ant-oat01-b",
+      refreshToken: "sk-ant-ort01-b",
+      expiresAt: Date.now() + 3_600_000,
+      scopes: ["user:inference"],
+    };
+    pool.addAccount(record);
+    expect(pool.getAll()).toHaveLength(2);
+    expect(accounts).toHaveLength(2); // same reference
+  });
+
+  it("addAccount rejects duplicate ids", () => {
+    const pool = new TokenPool([makeAccount("a")]);
+    const record: AccountRecord = {
+      id: "a",
+      accessToken: "x",
+      refreshToken: "x",
+      expiresAt: 0,
+      scopes: [],
+    };
+    expect(() => pool.addAccount(record)).toThrow(/already exists/);
+  });
+
+  it("updateAccount patches enabled and limits", () => {
+    const pool = new TokenPool([makeAccount("a")]);
+    pool.updateAccount("a", { enabled: false, weeklyLimitPercent: 42 });
+    const a = pool.getAll()[0];
+    expect(a.enabled).toBe(false);
+    expect(a.weeklyLimitPercent).toBe(42);
+    expect(a.sessionLimitPercent).toBe(100); // unchanged
+  });
+
+  it("updateAccount returns null for unknown id", () => {
+    const pool = new TokenPool([makeAccount("a")]);
+    expect(pool.updateAccount("nope", { enabled: false })).toBeNull();
+  });
+
+  it("getNext() throws EmptyPoolError when pool is empty", () => {
+    const pool = new TokenPool([makeAccount("a")]);
+    pool.removeAccount("a");
+    expect(() => pool.getNext()).toThrow(EmptyPoolError);
+  });
+});
+
+describe("TokenPool — user caps", () => {
+  it("skips disabled accounts", () => {
+    const a = makeAccount("a");
+    a.enabled = false;
+    const pool = new TokenPool([a, makeAccount("b")]);
+    const ids = [pool.getNext().id, pool.getNext().id];
+    expect(ids).toEqual(["b", "b"]);
+  });
+
+  it("skips accounts over the weekly cap", () => {
+    const a = makeAccount("a");
+    a.weeklyLimitPercent = 50;
+    a.rateLimits = { ...DEFAULT_RATE_LIMITS, sevenDayUtil: 0.55 }; // 55% > 50% cap
+    const pool = new TokenPool([a, makeAccount("b")]);
+    expect(pool.getNext().id).toBe("b");
+  });
+
+  it("skips accounts over the session cap", () => {
+    const a = makeAccount("a");
+    a.sessionLimitPercent = 80;
+    a.rateLimits = { ...DEFAULT_RATE_LIMITS, fiveHourUtil: 0.85 }; // 85% > 80% cap
+    const pool = new TokenPool([a, makeAccount("b")]);
+    expect(pool.getNext().id).toBe("b");
+  });
+
+  it("falls back to capped account when ALL are over cap", () => {
+    const a = makeAccount("a");
+    a.weeklyLimitPercent = 50;
+    a.rateLimits = { ...DEFAULT_RATE_LIMITS, sevenDayUtil: 0.6, fiveHourReset: 100 };
+    const pool = new TokenPool([a]);
+    // Should still return the account (advisory cap, not hard block)
+    expect(pool.getNext().id).toBe("a");
+  });
+
+  it("fires onCapBypass when falling back to capped accounts", () => {
+    const a = makeAccount("a");
+    a.weeklyLimitPercent = 50;
+    a.rateLimits = { ...DEFAULT_RATE_LIMITS, sevenDayUtil: 0.6, fiveHourReset: 100 };
+    const pool = new TokenPool([a]);
+    let bypassed: Account | null = null;
+    pool.onCapBypass = (acct) => { bypassed = acct; };
+    pool.getNext();
+    expect(bypassed).not.toBeNull();
+    expect(bypassed!.id).toBe("a");
   });
 });

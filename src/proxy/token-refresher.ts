@@ -1,5 +1,5 @@
-import type { Account, AccountRecord, RefreshResponse } from "./types.js";
-import { writeAccountsAtomic } from "../config/manager.js";
+import type { Account, RefreshResponse } from "./types.js";
+import { writeAccountsAtomic, serialize } from "../config/manager.js";
 import { logRefresh } from "./logger.js";
 import { stats } from "./stats.js";
 
@@ -98,14 +98,7 @@ async function _doRefresh(account: Account): Promise<boolean> {
  * Must be called after every successful refresh since refresh_token ROTATES.
  */
 export function saveAccounts(accounts: Account[]): void {
-  const records: AccountRecord[] = accounts.map(a => ({
-    id: a.id,
-    accessToken: a.tokens.accessToken,
-    refreshToken: a.tokens.refreshToken,
-    expiresAt: a.tokens.expiresAt,
-    scopes: a.tokens.scopes,
-  }));
-  writeAccountsAtomic(records);
+  writeAccountsAtomic(serialize(accounts));
 }
 
 /**

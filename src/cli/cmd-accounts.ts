@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { loadAccounts, accountsFileExists, writeAccountsAtomic } from "../config/manager.js";
+import { loadAccounts, accountsFileExists, writeAccountsAtomic, serialize } from "../config/manager.js";
 import { saveAccounts } from "../proxy/token-refresher.js";
 import { formatExpiry, redactToken } from "../utils/token-extractor.js";
 import { PROXY_PORT } from "../config/paths.js";
@@ -126,13 +126,7 @@ export function registerAccounts(program: Command): void {
       });
       if (!sure) { console.log(chalk.gray("Cancelled.")); return; }
 
-      writeAccountsAtomic(filtered.map(a => ({
-        id: a.id,
-        accessToken: a.tokens.accessToken,
-        refreshToken: a.tokens.refreshToken,
-        expiresAt: a.tokens.expiresAt,
-        scopes: a.tokens.scopes,
-      })));
+      writeAccountsAtomic(serialize(filtered));
 
       console.log(chalk.green(`✓ Removed "${id}". ${filtered.length} account(s) remaining.`));
       if (filtered.length === 0) {

@@ -1,6 +1,8 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Box, Text, useInput, useApp } from "ink";
 import type { LogEntry } from "../proxy/stats.js";
+import { createAccountsApi } from "./accountsApi.js";
+import type { AccountsApi } from "./accountsApi.js";
 
 const POLL_INTERVAL_MS = 2_000;
 const LOG_VISIBLE = 20;
@@ -29,6 +31,9 @@ interface AccountStat {
   lastUsedMs: number;
   lastRefreshMs: number;
   rateLimits?: AccountRateLimitsView;
+  enabled?: boolean;
+  sessionLimitPercent?: number;
+  weeklyLimitPercent?: number;
 }
 
 const EMPTY_RL: AccountRateLimitsView = {
@@ -53,34 +58,45 @@ interface HealthData {
   recentLogs: LogEntry[];
 }
 
+type Focus = "logs" | "accounts";
+type Mode = "view" | "editSession" | "editWeekly" | "confirmDelete";
+
 // ─── Dashboard component ──────────────────────────────────────────────────────
 
 export interface DashboardProps {
-  /** Port used when baseUrl is not provided — defaults to http://localhost:<port>/cc-router/health */
   port: number;
-  /** Explicit full base URL (e.g. "http://192.168.1.50:3456"). Takes precedence over port. */
   baseUrl?: string;
-  /** Optional Bearer secret for authenticating against a remote proxy */
   authToken?: string;
+  /** Callback fired when the dashboard wants the outer shell to perform an
+   *  action that can't run while Ink is rendering (e.g. OAuth flow). */
+  onIntent?: (intent: "quit" | "addAccount") => void;
 }
 
-export function Dashboard({ port, baseUrl, authToken }: DashboardProps) {
+export function Dashboard({ port, baseUrl, authToken, onIntent }: DashboardProps) {
   const { exit } = useApp();
   const [data, setData] = useState<HealthData | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<number>(0);
   const [retryCount, setRetryCount] = useState(0);
 
+  const resolvedBase = baseUrl
+    ? baseUrl.replace(/\/+$/, "")
+    : `http://localhost:${port}`;
+
+  const api = React.useMemo(
+    () => createAccountsApi(resolvedBase, authToken),
+    [resolvedBase, authToken],
+  );
+
+  // Only q to quit when no live data yet (no mode to cancel)
   useInput((input, key) => {
-    if (input === "q" || key.escape) exit();
+    if (!data && (input === "q" || key.escape)) exit();
   });
 
   useEffect(() => {
     let cancelled = false;
 
-    const healthUrl = baseUrl
-      ? `${baseUrl.replace(/\/+$/, "")}/cc-router/health`
-      : `http://localhost:${port}/cc-router/health`;
+    const healthUrl = `${resolvedBase}/cc-router/health`;
     const headers: Record<string, string> = authToken
       ? { authorization: `Bearer ${authToken}` }
       : {};
@@ -102,7 +118,7 @@ export function Dashboard({ port, baseUrl, authToken }: DashboardProps) {
         }
       } catch {
         if (cancelled) return;
-        setConnectError(`Cannot connect to http://localhost:${port}`);
+        setConnectError(`Cannot connect to ${resolvedBase}`);
         setRetryCount(n => n + 1);
       }
     };
@@ -110,7 +126,7 @@ export function Dashboard({ port, baseUrl, authToken }: DashboardProps) {
     poll();
     const timer = setInterval(poll, POLL_INTERVAL_MS);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [port]);
+  }, [resolvedBase, authToken]);
 
   if (connectError) {
     return <ErrorScreen error={connectError} port={port} retries={retryCount} />;
@@ -119,12 +135,20 @@ export function Dashboard({ port, baseUrl, authToken }: DashboardProps) {
   if (!data) {
     return (
       <Box flexDirection="column" marginTop={1}>
-        <Text color="yellow">⠋ Connecting to http://localhost:{port}...</Text>
+        <Text color="yellow">⠋ Connecting to {resolvedBase}...</Text>
       </Box>
     );
   }
 
-  return <LiveDashboard data={data} port={port} lastUpdate={lastUpdate} />;
+  return (
+    <LiveDashboard
+      data={data}
+      port={port}
+      lastUpdate={lastUpdate}
+      api={api}
+      onIntent={onIntent}
+    />
+  );
 }
 
 // ─── Error screen ─────────────────────────────────────────────────────────────
@@ -148,31 +172,191 @@ function ErrorScreen({ error, port, retries }: { error: string; port: number; re
 
 // ─── Live dashboard ───────────────────────────────────────────────────────────
 
-function LiveDashboard({ data, port, lastUpdate }: { data: HealthData; port: number; lastUpdate: number }) {
+function LiveDashboard({
+  data, port, lastUpdate, api, onIntent,
+}: {
+  data: HealthData; port: number; lastUpdate: number;
+  api: AccountsApi; onIntent?: (intent: "quit" | "addAccount") => void;
+}) {
+  const { exit } = useApp();
   const healthyCount = data.accounts.filter(a => a.healthy).length;
   const updatedAgo = Math.round((Date.now() - lastUpdate) / 1000);
   const logs = data.recentLogs;
 
-  // Stable selection: track by timestamp so it survives log rotations
-  const [selectedTs, setSelectedTs] = useState<number | null>(null);
+  // ── Focus / mode ──────────────────────────────────────────────────────────
+  const [focus, setFocus] = useState<Focus>("logs");
+  const [mode, setMode] = useState<Mode>("view");
 
-  // Derive index from timestamp; default to 0 (newest)
-  const selectedIndex = selectedTs !== null
+  // Selected log by timestamp (existing)
+  const [selectedTs, setSelectedTs] = useState<number | null>(null);
+  const selectedLogIndex = selectedTs !== null
     ? Math.max(0, logs.findIndex(l => l.ts === selectedTs))
     : 0;
 
-  useInput((_input, key) => {
-    if (key.upArrow) {
-      const next = Math.max(0, selectedIndex - 1);
-      setSelectedTs(logs[next]?.ts ?? null);
+  // Selected account by id
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  const selectedAccountIndex = selectedAccountId !== null
+    ? Math.max(0, data.accounts.findIndex(a => a.id === selectedAccountId))
+    : 0;
+  const selectedAccount = data.accounts[selectedAccountIndex] ?? null;
+
+  // Inline text input state (for w / s keys)
+  const [editBuffer, setEditBuffer] = useState("");
+
+  // Transient banner (error or success, cleared after 4s).
+  // The timer handle is stored in a ref so new banners cancel the previous
+  // timeout and component unmount also clears it — otherwise a deferred
+  // setBanner can fire on an unmounted component after `n` exits Ink.
+  const [banner, setBanner] = useState<{ text: string; color: string } | null>(null);
+  const bannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showBanner = useCallback((text: string, color: string) => {
+    if (bannerTimerRef.current) clearTimeout(bannerTimerRef.current);
+    setBanner({ text, color });
+    bannerTimerRef.current = setTimeout(() => {
+      setBanner(null);
+      bannerTimerRef.current = null;
+    }, 4_000);
+  }, []);
+  useEffect(() => () => {
+    if (bannerTimerRef.current) clearTimeout(bannerTimerRef.current);
+  }, []);
+
+  // Normalize any thrown value to a displayable string — rejections from
+  // fetch/AbortSignal can be DOMException without .message, strings, or
+  // even undefined.
+  const errMsg = (err: unknown): string => {
+    if (err instanceof Error && err.message) return err.message;
+    const s = String(err ?? "");
+    return s || "unknown error";
+  };
+
+  // ── Async helpers (fire-and-forget with error → banner) ──────────────────
+  const doToggleEnabled = useCallback(async () => {
+    if (!selectedAccount) return;
+    const newValue = !(selectedAccount.enabled !== false);
+    try {
+      await api.patch(selectedAccount.id, { enabled: newValue });
+      showBanner(`${selectedAccount.id} → ${newValue ? "enabled" : "disabled"}`, newValue ? "green" : "yellow");
+    } catch (err) {
+      showBanner(`Error: ${errMsg(err)}`, "red");
     }
-    if (key.downArrow) {
-      const next = Math.min(logs.length - 1, selectedIndex + 1);
-      setSelectedTs(logs[next]?.ts ?? null);
+  }, [selectedAccount, api, showBanner]);
+
+  const doSetLimit = useCallback(async (field: "sessionLimitPercent" | "weeklyLimitPercent", value: number) => {
+    if (!selectedAccount) return;
+    try {
+      await api.patch(selectedAccount.id, { [field]: value });
+      const label = field === "sessionLimitPercent" ? "5h cap" : "7d cap";
+      showBanner(`${selectedAccount.id} → ${label} = ${value}%`, "green");
+    } catch (err) {
+      showBanner(`Error: ${errMsg(err)}`, "red");
+    }
+  }, [selectedAccount, api, showBanner]);
+
+  const doDelete = useCallback(async () => {
+    if (!selectedAccount) return;
+    try {
+      await api.remove(selectedAccount.id);
+      showBanner(`Removed ${selectedAccount.id}`, "yellow");
+      setSelectedAccountId(null);
+    } catch (err) {
+      showBanner(`Error: ${errMsg(err)}`, "red");
+    }
+  }, [selectedAccount, api, showBanner]);
+
+  // ── Keyboard handler ──────────────────────────────────────────────────────
+  useInput((input, key) => {
+    // ── Text editing mode (w / s) ───────────────────────────────────────
+    if (mode === "editSession" || mode === "editWeekly") {
+      if (key.escape) {
+        setMode("view");
+        setEditBuffer("");
+        return;
+      }
+      if (key.return) {
+        const parsed = parseInt(editBuffer, 10);
+        if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 100) {
+          const field = mode === "editSession" ? "sessionLimitPercent" as const : "weeklyLimitPercent" as const;
+          void doSetLimit(field, parsed);
+        } else {
+          showBanner("Invalid: enter a number 0–100", "red");
+        }
+        setMode("view");
+        setEditBuffer("");
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setEditBuffer(b => b.slice(0, -1));
+        return;
+      }
+      if (/^[0-9]$/.test(input) && editBuffer.length < 3) {
+        setEditBuffer(b => b + input);
+      }
+      return;
+    }
+
+    // ── Confirm delete (y/n) ────────────────────────────────────────────
+    if (mode === "confirmDelete") {
+      if (input === "y" || input === "Y") {
+        void doDelete();
+        setMode("view");
+      } else {
+        setMode("view");
+        showBanner("Delete cancelled", "gray");
+      }
+      return;
+    }
+
+    // ── Normal view mode ────────────────────────────────────────────────
+    if (input === "q") { onIntent ? onIntent("quit") : exit(); return; }
+    if (key.escape) {
+      if (focus === "accounts") { setFocus("logs"); return; }
+      onIntent ? onIntent("quit") : exit();
+      return;
+    }
+
+    if (key.tab) {
+      setFocus(f => f === "logs" ? "accounts" : "logs");
+      return;
+    }
+
+    // Navigation: ↑↓ move within the focused panel
+    if (focus === "logs") {
+      if (key.upArrow) {
+        const next = Math.max(0, selectedLogIndex - 1);
+        setSelectedTs(logs[next]?.ts ?? null);
+      }
+      if (key.downArrow) {
+        const next = Math.min(logs.length - 1, selectedLogIndex + 1);
+        setSelectedTs(logs[next]?.ts ?? null);
+      }
+    }
+
+    if (focus === "accounts") {
+      if (key.upArrow) {
+        const next = Math.max(0, selectedAccountIndex - 1);
+        setSelectedAccountId(data.accounts[next]?.id ?? null);
+      }
+      if (key.downArrow) {
+        const next = Math.min(data.accounts.length - 1, selectedAccountIndex + 1);
+        setSelectedAccountId(data.accounts[next]?.id ?? null);
+      }
+
+      // Account actions (only when focus = accounts)
+      if (input === "e") { void doToggleEnabled(); return; }
+      if (input === "w") { setMode("editWeekly"); setEditBuffer(""); return; }
+      if (input === "s") { setMode("editSession"); setEditBuffer(""); return; }
+      if (input === "d") { setMode("confirmDelete"); return; }
+    }
+
+    // n = add account — works regardless of focus
+    if (input === "n") {
+      if (onIntent) { onIntent("addAccount"); exit(); }
+      return;
     }
   });
 
-  const selectedLog = logs[selectedIndex] ?? null;
+  const selectedLog = logs[selectedLogIndex] ?? null;
   const visibleLogs = logs.slice(0, LOG_VISIBLE);
 
   return (
@@ -185,26 +369,68 @@ function LiveDashboard({ data, port, lastUpdate }: { data: HealthData; port: num
         <Text color="green">{data.mode}</Text>
         <Text color="gray"> → {data.target}  · </Text>
         <Text>up {formatUptime(data.uptime)}</Text>
-        <Text color="gray">  ·  updated {updatedAgo}s ago  ·  [↑↓] navigate  ·  [q] quit</Text>
+        <Text color="gray">  ·  updated {updatedAgo}s ago  ·  [q] quit</Text>
       </Box>
 
       <Box marginTop={1} />
 
       {/* ── Accounts table ── */}
       <Box flexDirection="column">
-        <Text bold>
-          {" ACCOUNTS  "}
-          <Text color={healthyCount === data.accounts.length ? "green" : "yellow"}>
-            {healthyCount}/{data.accounts.length} healthy
+        <Box>
+          <Text bold>
+            {" ACCOUNTS  "}
+            <Text color={healthyCount === data.accounts.length ? "green" : "yellow"}>
+              {healthyCount}/{data.accounts.length} healthy
+            </Text>
           </Text>
-        </Text>
+          <Text color="gray">{"   "}</Text>
+          <Text color={focus === "accounts" ? "white" : "gray"}>
+            [Tab] focus  [e] toggle  [w] 7d cap  [s] 5h cap  [n] add  [d] delete
+          </Text>
+        </Box>
 
         <Box marginTop={1} flexDirection="column">
-          {data.accounts.map(a => (
-            <AccountRow key={a.id} account={a} />
+          {data.accounts.map((a, i) => (
+            <AccountRow
+              key={a.id}
+              account={a}
+              selected={focus === "accounts" && i === selectedAccountIndex}
+            />
           ))}
         </Box>
       </Box>
+
+      {/* ── Inline prompt (edit / confirm) ── */}
+      {mode === "editWeekly" && selectedAccount && (
+        <Box marginTop={1} paddingLeft={2}>
+          <Text color="cyan">Set 7d cap for </Text>
+          <Text color="white" bold>{selectedAccount.id}</Text>
+          <Text color="cyan"> (0–100%): </Text>
+          <Text color="white" bold>{editBuffer}</Text>
+          <Text color="gray">█  [Enter] save  [Esc] cancel</Text>
+        </Box>
+      )}
+      {mode === "editSession" && selectedAccount && (
+        <Box marginTop={1} paddingLeft={2}>
+          <Text color="cyan">Set 5h cap for </Text>
+          <Text color="white" bold>{selectedAccount.id}</Text>
+          <Text color="cyan"> (0–100%): </Text>
+          <Text color="white" bold>{editBuffer}</Text>
+          <Text color="gray">█  [Enter] save  [Esc] cancel</Text>
+        </Box>
+      )}
+      {mode === "confirmDelete" && selectedAccount && (
+        <Box marginTop={1} paddingLeft={2}>
+          <Text color="red" bold>Delete "{selectedAccount.id}"?  [y] yes  [n/Esc] cancel</Text>
+        </Box>
+      )}
+
+      {/* ── Banner (transient action feedback) ── */}
+      {banner && (
+        <Box marginTop={1} paddingLeft={2}>
+          <Text color={banner.color as any}> {banner.text}</Text>
+        </Box>
+      )}
 
       <Box marginTop={1} />
 
@@ -243,14 +469,14 @@ function LiveDashboard({ data, port, lastUpdate }: { data: HealthData; port: num
           {visibleLogs.length === 0
             ? <Text color="gray">  No activity yet</Text>
             : visibleLogs.map((log, i) => (
-                <LogRow key={`${log.ts}-${i}`} log={log} selected={i === selectedIndex} />
+                <LogRow key={`${log.ts}-${i}`} log={log} selected={focus === "logs" && i === selectedLogIndex} />
               ))
           }
         </Box>
       </Box>
 
       {/* ── Detail panel ── */}
-      {selectedLog && (
+      {focus === "logs" && selectedLog && (
         <>
           <Box marginTop={1} />
           <DetailPanel log={selectedLog} />
@@ -263,14 +489,15 @@ function LiveDashboard({ data, port, lastUpdate }: { data: HealthData; port: num
 
 // ─── Account row (two-line: status + utilization bars) ───────────────────────
 
-function AccountRow({ account: a }: { account: AccountStat }) {
+function AccountRow({ account: a, selected }: { account: AccountStat; selected: boolean }) {
   const rl = a.rateLimits ?? EMPTY_RL;
   const isLimited = rl.status === "rate_limited";
+  const isDisabled = a.enabled === false;
 
-  const dot = isLimited ? "⊘" : a.busy ? "◌" : a.healthy ? "●" : "●";
-  const dotColor = isLimited ? "red" : a.busy ? "yellow" : a.healthy ? "green" : "red";
-  const statusLabel = isLimited ? "LIMITED" : a.busy ? "busy   " : a.healthy ? "ok     " : "ERROR  ";
-  const statusColor = isLimited ? "red" : a.busy ? "yellow" : a.healthy ? "green" : "red";
+  const dot = isDisabled ? "⊘" : isLimited ? "⊘" : a.busy ? "◌" : a.healthy ? "●" : "●";
+  const dotColor = isDisabled ? "gray" : isLimited ? "red" : a.busy ? "yellow" : a.healthy ? "green" : "red";
+  const statusLabel = isDisabled ? "OFF    " : isLimited ? "LIMITED" : a.busy ? "busy   " : a.healthy ? "ok     " : "ERROR  ";
+  const statusColor = isDisabled ? "gray" : isLimited ? "red" : a.busy ? "yellow" : a.healthy ? "green" : "red";
 
   const expiryLabel = a.expiresInMs > 0 ? formatMs(a.expiresInMs) : "EXPIRED";
   const expiryColor = a.expiresInMs < 10 * 60 * 1000 ? "red"
@@ -279,11 +506,23 @@ function AccountRow({ account: a }: { account: AccountStat }) {
 
   const planTag = rl.plan ? ` [${rl.plan}]` : "";
 
+  // User-defined caps hint
+  const s5 = a.sessionLimitPercent ?? 100;
+  const w7 = a.weeklyLimitPercent ?? 100;
+  const hasCaps = s5 < 100 || w7 < 100;
+  const capsHint = hasCaps
+    ? ` cap${s5 < 100 ? ` 5h≤${s5}%` : ""}${w7 < 100 ? ` 7d≤${w7}%` : ""}`
+    : "";
+
+  const pointer = selected ? "▶" : " ";
+  const nameColor = isDisabled ? "gray" : undefined;
+
   return (
     <Box flexDirection="column">
       <Box>
+        <Text color={selected ? "cyan" : undefined}>{pointer}</Text>
         <Text color={dotColor}> {dot} </Text>
-        <Text>{a.id.slice(0, 20).padEnd(20)}</Text>
+        <Text color={nameColor} dimColor={isDisabled}>{a.id.slice(0, 20).padEnd(20)}</Text>
         <Text color={statusColor}>{statusLabel}</Text>
         {planTag && <Text color="magenta">{planTag.padEnd(10)}</Text>}
         {!planTag && <Text>{"".padEnd(10)}</Text>}
@@ -295,12 +534,13 @@ function AccountRow({ account: a }: { account: AccountStat }) {
         <Text color={expiryColor}>{expiryLabel.padEnd(8)}</Text>
         <Text color="gray">  last </Text>
         <Text color="gray">{formatAgo(a.lastUsedMs)}</Text>
+        {capsHint && <Text color="yellow">{capsHint}</Text>}
       </Box>
       {rl.lastUpdated > 0 && (
         <Box paddingLeft={4}>
-          <UtilBar label="5h" util={rl.fiveHourUtil} resetTs={rl.fiveHourReset} isActive={rl.claim === "five_hour"} />
+          <UtilBar label="5h" util={rl.fiveHourUtil} resetTs={rl.fiveHourReset} isActive={rl.claim === "five_hour"} cap={s5} />
           <Text>   </Text>
-          <UtilBar label="7d" util={rl.sevenDayUtil} resetTs={rl.sevenDayReset} isActive={rl.claim === "seven_day"} />
+          <UtilBar label="7d" util={rl.sevenDayUtil} resetTs={rl.sevenDayReset} isActive={rl.claim === "seven_day"} cap={w7} />
         </Box>
       )}
     </Box>
@@ -309,20 +549,23 @@ function AccountRow({ account: a }: { account: AccountStat }) {
 
 // ─── Utilization bar ─────────────────────────────────────────────────────────
 
-function UtilBar({ label, util, resetTs, isActive }: { label: string; util: number; resetTs: number; isActive: boolean }) {
+function UtilBar({ label, util, resetTs, isActive, cap }: { label: string; util: number; resetTs: number; isActive: boolean; cap: number }) {
   const pct = Math.round(util * 100);
   const BAR_W = 12;
   const filled = Math.round(util * BAR_W);
+  const capPos = Math.round((cap / 100) * BAR_W);
   const bar = "█".repeat(Math.min(filled, BAR_W)) + "░".repeat(Math.max(BAR_W - filled, 0));
-  const color = pct >= 90 ? "red" : pct >= 70 ? "yellow" : "green";
+  const color = pct >= cap ? "red" : pct >= 90 ? "red" : pct >= 70 ? "yellow" : "green";
 
   const resetLabel = resetTs > 0 ? formatResetIn(resetTs) : "";
+  const capLabel = cap < 100 ? ` cap ${cap}%` : "";
 
   return (
     <Box>
       <Text color={isActive ? "white" : "gray"} bold={isActive}>{label} </Text>
       <Text color={color}>{bar}</Text>
       <Text color={color}>{String(pct).padStart(4)}%</Text>
+      {capLabel && <Text color="yellow">{capLabel}</Text>}
       {resetLabel && <Text color="gray"> ↻{resetLabel}</Text>}
     </Box>
   );
@@ -528,8 +771,6 @@ function TokenSummary({ cacheRead, cacheCreated, uncached, output }: { cacheRead
   const totalInput = cacheRead + cacheCreated + uncached;
   const totalAll = totalInput + output;
   if (totalAll === 0) return null;
-
-  const hitPct = totalInput > 0 ? (cacheRead / totalInput) * 100 : 0;
 
   return (
     <Box paddingLeft={2}>
